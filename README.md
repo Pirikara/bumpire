@@ -103,5 +103,6 @@ uv run depfix preview \
 - Bundlerでは`bundle lock`、npmでは`npm install --package-lock-only --ignore-scripts`だけを実行し、アプリケーションコードやtestは自動実行しません。
 - 変更可能なファイルはplannerが指定した依存manifestと、対応するlockfileだけです。
 - plannerが成功を宣言しても終了できません。lockfileが解決し、安全版が実際に選択された場合だけ成功します。
+- resolver成功は依存グラフと安全版の選択だけを証明します。修正後testを実行するまでは、API・挙動・runtime互換性を証明したとは扱いません。
 
 現段階の隔離は一時cloneによるファイル分離です。コマンド実行をOSレベルで隔離するDocker backend、private registry、修正後test、残存CVEスキャン、PR作成は次の実装対象です。

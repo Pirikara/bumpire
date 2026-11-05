@@ -109,7 +109,10 @@ class AutofixAgentContext:
                 "target_before": attempt.target_before,
                 "target_after": attempt.target_after,
                 "changed_files": attempt.changed_files,
-                "message": "deterministic verification passed; stop and report completion",
+                "message": (
+                    "dependency resolution verification passed; stop and report completion "
+                    "without claiming untested runtime or API compatibility"
+                ),
             }
         return {
             "accepted": True,
@@ -240,7 +243,10 @@ gems, you may align a direct parent and add a safe child constraint.
 
 Only the tool's success=true result proves completion. When it succeeds, stop making
 tool calls and return a short completion message. If the attempt budget is exhausted,
-state that no verified fix was found.
+state that no verified fix was found. Resolver success proves only that the dependency
+graph resolves, the target reaches the safe version, and changed files pass the allowlist.
+Never claim API, behavioral, or runtime compatibility because application tests are not
+available in this tool surface.
 """.strip()
 
     @staticmethod

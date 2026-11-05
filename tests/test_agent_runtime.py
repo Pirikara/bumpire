@@ -91,6 +91,7 @@ async def test_context_accepts_only_one_verified_fix() -> None:
     second = await context.try_plan(plan)
 
     assert first["success"] is True
+    assert "without claiming untested runtime or API compatibility" in first["message"]
     assert second == {
         "accepted": False,
         "success": True,
