@@ -2,11 +2,11 @@
 
 依存関係の脆弱性修正を、隔離したclone上で計画・実行・検証するエージェントループの実験実装です。
 
-LLMは「どの直接依存や制約を変更するか」を計画します。manifest編集、パッケージマネージャーの実行、lockfile確認、終了判定は決定論的なコードが担当します。
+LLMは、許可されたdependency manifestを読み、「どのファイルをどう変更するか」を計画します。package managerの検出条件、許可manifest、resolver環境、lockfile確認方法は宣言的なTOML profileで与えます。コマンド実行、変更範囲、安全版、終了判定は共通の決定論的コードが担当します。
 
 このツールの責務は、安全版へ解決できる最小の依存関係差分を生成し、レビュー可能なPRとして提出するところまでです。アプリケーションのtest、lint、build、互換性判定は導入先リポジトリの既存CIへ委ねます。
 
-現在のMVPはnpmとBundlerを自動検出します。デフォルトはAPI不要のヒューリスティックplannerで、npmのローカルpeer dependencyや、Railsのようにコンポーネントを同一バージョンへ固定する構成を処理できます。`--planner agent`ではOpenAI Agents SDKのtool loopを使い、モデルproviderはLiteLLM経由で選択します。
+現在のMVPはnpmとBundlerをTOML profileで自動検出します。`--planner agent`はpackage manager共通のmanifest replacement toolを使う主実験経路で、モデルproviderはLiteLLM経由で選択します。API不要の`heuristic`と、従来のPython adapterを使う`adapter-agent`も比較用に残しています。
 
 ## Architecture
 
@@ -14,12 +14,14 @@ LLMは「どの直接依存や制約を変更するか」を計画します。ma
 PreviewOrchestrator
 ├── isolated shallow git clone (hooks disabled)
 ├── Docker resolver sandbox (default)
-├── ecosystem adapter
-│   ├── npm: package.json / package-lock.json
-│   └── Bundler: Gemfile / Gemfile.lock
+├── declarative package-manager profile
+│   ├── detection + allowed manifests
+│   ├── runtime image + resolver procedure
+│   └── resolved-version probe
 ├── planner
-│   ├── heuristic
-│   ├── Agents SDK + LiteLLM
+│   ├── generic Agents SDK + LiteLLM (primary experiment)
+│   ├── heuristic + Python adapter (baseline)
+│   ├── adapter-agent (legacy comparison)
 │   └── OpenAI structured planner (legacy experiment)
 └── verification gate
     ├── dependency graph resolves
@@ -30,7 +32,19 @@ PreviewOrchestrator
 
 各試行は新しいcloneと一時コンテナで実行されます。元のリポジトリは変更しません。成功時はstaged diffをpreviewとして返します。Dockerを使えない開発環境では`--sandbox local`で従来のhost実行へ切り替えられます。
 
-コアのループはpackage manager非依存で、adapter protocolが検出、manifest編集、resolver実行、lockfile読取を担当します。対応ecosystemはadapter単位で増やします。現時点の実装済みadapterはnpmとBundlerで、pnpm、Yarn、Bunは未実装です。
+`--planner agent`のコアはpackage manager非依存です。agentにはprofileが許可した既存manifestの内容だけを渡し、agentは変更するmanifestの全文をtoolへ返します。共通executorはそれを新しいcloneへ書き、profile内の信頼済みresolver手順をDockerで実行し、安全版と変更ファイルを検証します。agentはimage、shell command、lockfile、成功条件を変更できません。
+
+新しいpackage managerは原則として`depfix/profiles/*.toml`を追加します。profileに必要なのは次の情報です。
+
+- workspaceの検出条件とmanifest glob
+- manifest内で変更可能なdependency領域
+- 変更を許可するlockfile
+- runtime versionの取得方法とDocker image
+- lockfileを再解決する手順
+- 解決済みtarget versionを取り出す手順
+- agent向けのpackage manager固有ヒント
+
+この範囲で表現できるpackage managerなら、Python adapterは不要です。一方で、特殊な認証、複数lockfileの選択、独自sandbox、lockfileの複雑な意味解析など新しい安全性primitiveが必要なら共通executor側へ実装を足します。つまり「差分の考案」はagentへ寄せますが、「何を実行・変更・成功と認めるか」はprofileと共通コードに残します。現在のbuiltin profileはnpmとBundlerで、pnpm、Yarn、Bunはまだ追加していません。
 
 ## Workflowとagent loopの境界
 
@@ -44,7 +58,7 @@ PreviewOrchestrator
 6. 安全版、変更ファイル、差分を検証する
 7. 失敗ならresolverの結果をplannerへ戻し、別の候補を試す
 
-「agentic」なのはステップ自体を自由に選ぶことではなく、3と7の閉ループです。clone、コマンド実行、成功判定、終了条件はplannerに委ねません。また、Aikidoの画面に`agentic ... update`と表示されることだけでは、内側でLLMが使われているかは判定できません。この実装ではplannerを交換可能にし、同じworkflowをヒューリスティックでもLLMでも動かせます。Agent plannerが呼べる書込み系toolは`try_dependency_fix`だけで、各呼出しは新しい隔離clone上でresolverとverification gateを実行します。
+「agentic」なのはステップ自体を自由に選ぶことではなく、3と7の閉ループです。clone、コマンド実行、成功判定、終了条件はplannerに委ねません。また、Aikidoの画面に`agentic ... update`と表示されることだけでは、内側でLLMが使われているかは判定できません。この実装ではplannerを交換可能にし、同じworkflowをヒューリスティックでもLLMでも動かせます。汎用Agent plannerが呼べる書込み系toolは`try_profile_fix`だけで、各呼出しは新しい隔離clone上でresolverとverification gateを実行します。
 
 ## npm peer dependency example
 
@@ -99,6 +113,8 @@ uv run depfix preview \
 
 モデル名はLiteLLM形式です。例えば`gemini/...`、`groq/...`、`ollama_chat/...`などへ同じagent loopを接続できます。provider標準のAPI key環境変数を利用するか、`--api-key-env MY_PROVIDER_KEY`で明示します。OpenAI Agents SDKはtool実行とturn管理に使用しますが、モデルproviderをOpenAIへ固定しません。
 
+従来の構造化edit adapterとの比較には`--planner adapter-agent`を使えます。`--planner agent`は安全上Docker必須です。profile-driven agentはmanifest本文を生成できるぶん柔軟ですが、実行可能なresolver commandは信頼済みprofileに固定されています。
+
 ## Safety model
 
 - 元の作業ツリーではなく、一時cloneだけを編集します。
@@ -107,7 +123,7 @@ uv run depfix preview \
 - 一時cloneだけをread-write mountし、`.git` metadataは別のread-only mountで保護します。
 - コンテナが作ったstaged、unstaged、untrackedファイルをすべて検査し、allowlist外の変更があれば失敗させます。
 - Bundlerでは`bundle lock`、npmでは`npm install --package-lock-only --ignore-scripts`だけを実行し、アプリケーションコードやtestは自動実行しません。
-- 変更可能なファイルはplannerが指定した依存manifestと、対応するlockfileだけです。
+- agentが置換できるのはprofileのglobに一致する既存dependency manifestだけです。対応するlockfileはagentではなくresolverだけが更新します。
 - plannerが成功を宣言しても終了できません。lockfileが解決し、安全版が実際に選択された場合だけ成功します。
 - resolver成功は依存グラフと安全版の選択だけを証明します。API・挙動・runtime互換性は主張せず、その判定はPR上で動く導入先リポジトリのCIに委ねます。
 

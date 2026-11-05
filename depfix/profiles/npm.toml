@@ -1,0 +1,46 @@
+name = "npm"
+ecosystem = "npm"
+detect_all = ["package.json", "package-lock.json"]
+manifest_globs = ["package.json", "**/package.json"]
+lockfiles = ["package-lock.json"]
+image_template = "node:{runtime_version}-bookworm-slim"
+default_runtime_version = "22"
+default_manager_version = ""
+locked_version_pattern = '"node_modules/{package}"\s*:\s*\{.*?"version"\s*:\s*"(?P<version>[^"]+)"'
+instructions = """
+Edit package.json dependency fields only. Preserve unrelated metadata and formatting as
+closely as possible. For a local package peer conflict, update the root dependency and
+the local package's peerDependencies together. Never edit package-lock.json directly;
+the resolver owns it.
+"""
+resolver_script = '''
+mkdir -p "$HOME" /tmp/npm-cache
+export npm_config_cache=/tmp/npm-cache
+export npm_config_update_notifier=false
+if [ -n "${DEPFIX_MANAGER_VERSION:-}" ]; then
+  npm install --global --prefix /tmp/npm-global "npm@${DEPFIX_MANAGER_VERSION}" --ignore-scripts --no-audit --no-fund
+  export PATH="/tmp/npm-global/bin:$PATH"
+fi
+npm install --package-lock-only --ignore-scripts --no-audit --no-fund
+resolved=$(node -e 'const fs=require("fs"); const lock=JSON.parse(fs.readFileSync("package-lock.json","utf8")); const p=process.argv[1]; const item=(lock.packages||{})["node_modules/"+p] || (lock.dependencies||{})[p]; if(!item || !item.version) process.exit(2); process.stdout.write(item.version)' "$DEPFIX_PACKAGE")
+printf 'DEPFIX_RESOLVED_VERSION=%s\n' "$resolved"
+'''
+
+[manifest_policy]
+kind = "json-sections"
+allowed_sections = [
+  "dependencies",
+  "devDependencies",
+  "optionalDependencies",
+  "peerDependencies",
+  "peerDependenciesMeta",
+  "overrides",
+]
+
+[[runtime_version_sources]]
+path = "package.json"
+pattern = '"node"\s*:\s*"(?P<version>\d+\.\d+\.\d+)"'
+
+[[manager_version_sources]]
+path = "package.json"
+pattern = '"packageManager"\s*:\s*"npm@(?P<version>[^"]+)"'

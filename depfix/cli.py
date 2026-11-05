@@ -38,7 +38,7 @@ def _parser() -> argparse.ArgumentParser:
     preview.add_argument("--advisory-id")
     preview.add_argument(
         "--planner",
-        choices=("heuristic", "agent", "ai"),
+        choices=("heuristic", "agent", "adapter-agent", "ai"),
         default="heuristic",
     )
     preview.add_argument("--model", default=os.environ.get("DEPFIX_MODEL", ""))
@@ -60,44 +60,66 @@ async def _preview(args: argparse.Namespace) -> int:
     if not (repo / ".git").exists():
         raise ValueError(f"--repo must be a Git repository: {repo}")
 
-    adapter = create_adapter(
-        repo,
-        args.workspace,
-        events,
-        args.ecosystem,
-        args.sandbox,
-    )
-    issue = DependencyIssue(
-        ecosystem=adapter.ecosystem,
-        package=args.package,
-        safe_version=args.safe_version,
-        advisory_id=args.advisory_id,
-    )
     if args.planner == "agent":
-        from depfix.agent_runtime import AgentAutofixRunner
+        from depfix.docker_runtime import DockerRuntime
+        from depfix.profile import detect_profile
+        from depfix.profile_adapter import ProfileAdapter
+        from depfix.profile_agent_runtime import ProfileAgentAutofixRunner
 
-        api_key = None
-        if args.api_key_env:
-            api_key = os.environ.get(args.api_key_env)
-            if not api_key:
-                raise ValueError(f"environment variable is not set: {args.api_key_env}")
-        result = await AgentAutofixRunner(
+        if args.sandbox != "docker":
+            raise ValueError("profile-driven agent execution requires --sandbox docker")
+        profile = detect_profile(repo, args.workspace, args.ecosystem)
+        DockerRuntime.ensure_available()
+        adapter = ProfileAdapter(repo, args.workspace, events, profile)
+        issue = DependencyIssue(
+            ecosystem=profile.ecosystem,
+            package=args.package,
+            safe_version=args.safe_version,
+            advisory_id=args.advisory_id,
+        )
+        result = await ProfileAgentAutofixRunner(
             adapter,
             events,
             model_name=args.model,
             max_attempts=args.max_attempts,
             max_turns=args.max_turns,
-            api_key=api_key,
+            api_key=_api_key(args),
             base_url=args.api_base,
         ).run(issue)
     else:
-        planner = AIPlanner(args.model) if args.planner == "ai" else HeuristicPlanner()
-        result = await AutofixEngine(
-            adapter,
-            planner,
+        adapter = create_adapter(
+            repo,
+            args.workspace,
             events,
-            max_attempts=args.max_attempts,
-        ).run(issue)
+            args.ecosystem,
+            args.sandbox,
+        )
+        issue = DependencyIssue(
+            ecosystem=adapter.ecosystem,
+            package=args.package,
+            safe_version=args.safe_version,
+            advisory_id=args.advisory_id,
+        )
+        if args.planner == "adapter-agent":
+            from depfix.agent_runtime import AgentAutofixRunner
+
+            result = await AgentAutofixRunner(
+                adapter,
+                events,
+                model_name=args.model,
+                max_attempts=args.max_attempts,
+                max_turns=args.max_turns,
+                api_key=_api_key(args),
+                base_url=args.api_base,
+            ).run(issue)
+        else:
+            planner = AIPlanner(args.model) if args.planner == "ai" else HeuristicPlanner()
+            result = await AutofixEngine(
+                adapter,
+                planner,
+                events,
+                max_attempts=args.max_attempts,
+            ).run(issue)
 
     if args.output and result.diff:
         args.output.write_text(result.diff, encoding="utf-8")
@@ -126,6 +148,15 @@ async def _preview(args: argparse.Namespace) -> int:
     if result.status == "fixed":
         return 0
     return 1 if result.status == "failed" else 2
+
+
+def _api_key(args: argparse.Namespace) -> str | None:
+    if not args.api_key_env:
+        return None
+    api_key = os.environ.get(args.api_key_env)
+    if not api_key:
+        raise ValueError(f"environment variable is not set: {args.api_key_env}")
+    return api_key
 
 
 def main() -> None:

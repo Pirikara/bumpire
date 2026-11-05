@@ -1,0 +1,40 @@
+name = "bundler"
+ecosystem = "bundler"
+detect_all = ["Gemfile", "Gemfile.lock"]
+manifest_globs = ["Gemfile"]
+lockfiles = ["Gemfile.lock"]
+image_template = "ruby:{runtime_version}-slim"
+default_runtime_version = "3.3"
+default_manager_version = ""
+locked_version_pattern = '(?m)^    {package} \((?P<version>[^)]+)\)$'
+instructions = """
+Edit Gemfile declarations only. Preserve sources, Ruby version, and unrelated gems. For
+an umbrella gem such as Rails, update the direct parent when its exact component pins
+block the safe transitive version. Do not add a direct child pin unless resolver evidence
+shows that it is necessary. Never edit Gemfile.lock directly; Bundler owns it.
+"""
+resolver_script = '''
+mkdir -p "$HOME" /tmp/gems
+export GEM_HOME=/tmp/gems
+export PATH="$GEM_HOME/bin:$PATH"
+if [ -n "${DEPFIX_MANAGER_VERSION:-}" ]; then
+  gem install bundler --version "$DEPFIX_MANAGER_VERSION" --no-document
+  bundle "_${DEPFIX_MANAGER_VERSION}_" lock
+else
+  bundle lock
+fi
+resolved=$(ruby -e 'name=ARGV[0]; line=File.readlines("Gemfile.lock").find { |item| item.match?(/^    #{Regexp.escape(name)} \([^)]+\)$/) }; exit 2 unless line; print line[/\(([^)]+)\)/,1]' "$DEPFIX_PACKAGE")
+printf 'DEPFIX_RESOLVED_VERSION=%s\n' "$resolved"
+'''
+
+[manifest_policy]
+kind = "changed-line-patterns"
+allowed_line_patterns = ['^\s*gem(?:\s|\()']
+
+[[runtime_version_sources]]
+path = ".ruby-version"
+pattern = '^(?P<version>(?:ruby-)?\d+\.\d+(?:\.\d+)?)$'
+
+[[manager_version_sources]]
+path = "Gemfile.lock"
+pattern = '(?m)^BUNDLED WITH\n\s+(?P<version>[^\s]+)$'
