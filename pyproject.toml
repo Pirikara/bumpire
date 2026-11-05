@@ -11,6 +11,11 @@ dependencies = [
   "pydantic>=2.11.0,<3",
 ]
 
+[project.urls]
+Homepage = "https://github.com/Pirikara/bumpire"
+Repository = "https://github.com/Pirikara/bumpire"
+Issues = "https://github.com/Pirikara/bumpire/issues"
+
 [project.scripts]
 bumpire = "bumpire.cli:main"
 
