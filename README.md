@@ -4,7 +4,7 @@
 
 LLMは「どの直接依存や制約を変更するか」を計画します。manifest編集、パッケージマネージャーの実行、lockfile確認、終了判定は決定論的なコードが担当します。
 
-現在のMVPはBundlerに対応しています。デフォルトはAPI不要のヒューリスティックplannerで、Railsのようにコンポーネントを同一バージョンへ固定する構成を処理できます。`--planner ai`を指定するとOpenAI Responses APIの構造化出力をplannerとして使用します。
+現在のMVPはnpmとBundlerを自動検出します。デフォルトはAPI不要のヒューリスティックplannerで、npmのローカルpeer dependencyや、Railsのようにコンポーネントを同一バージョンへ固定する構成を処理できます。`--planner ai`を指定するとOpenAI Responses APIの構造化出力をplannerとして使用します。
 
 ## Architecture
 
@@ -12,7 +12,8 @@ LLMは「どの直接依存や制約を変更するか」を計画します。ma
 PreviewOrchestrator
 ├── isolated shallow git clone (hooks disabled)
 ├── ecosystem adapter
-│   └── Bundler: Gemfile / Gemfile.lock / bundle lock
+│   ├── npm: package.json / package-lock.json
+│   └── Bundler: Gemfile / Gemfile.lock
 ├── planner
 │   ├── heuristic
 │   └── AI structured planner
@@ -24,6 +25,8 @@ PreviewOrchestrator
 ```
 
 各試行は新しいcloneで実行されます。元のリポジトリは変更しません。成功時はstaged diffをpreviewとして返します。
+
+コアのループはpackage manager非依存で、adapter protocolが検出、manifest編集、resolver実行、lockfile読取を担当します。対応ecosystemはadapter単位で増やします。現時点の実装済みadapterはnpmとBundlerで、pnpm、Yarn、Bunは未実装です。
 
 ## Workflowとagent loopの境界
 
@@ -38,6 +41,19 @@ PreviewOrchestrator
 7. 失敗ならresolverの結果をplannerへ戻し、別の候補を試す
 
 「agentic」なのはステップ自体を自由に選ぶことではなく、3と7の閉ループです。clone、コマンド実行、成功判定、終了条件はplannerに委ねません。また、Aikidoの画面に`agentic ... update`と表示されることだけでは、内側でLLMが使われているかは判定できません。この実装ではplannerを交換可能にし、同じworkflowをヒューリスティックでもLLMでも動かせます。
+
+## npm peer dependency example
+
+```sh
+uv run depfix preview \
+  --repo ../aikido-peer-dependency-repro \
+  --package lodash \
+  --safe-version 4.18.1 \
+  --planner heuristic \
+  --output npm-peer.patch
+```
+
+このfixtureではrootの`lodash`だけを更新する最初の試行が`ERESOLVE`になります。2回目はローカルpackageの`peerDependencies`も同じ安全版へ揃えます。生成差分はAikido PR #2と一致する3ファイルです。
 
 ## Rails / Active Storage example
 
@@ -80,8 +96,8 @@ uv run depfix preview \
 
 - 元の作業ツリーではなく、一時cloneだけを編集します。
 - clone、add、diffではGit hooksを無効化します。
-- `bundle lock`だけを実行し、アプリケーションコードやtestは自動実行しません。
-- 変更可能なファイルは対象workspaceの`Gemfile`と`Gemfile.lock`だけです。
+- Bundlerでは`bundle lock`、npmでは`npm install --package-lock-only --ignore-scripts`だけを実行し、アプリケーションコードやtestは自動実行しません。
+- 変更可能なファイルはplannerが指定した依存manifestと、対応するlockfileだけです。
 - plannerが成功を宣言しても終了できません。lockfileが解決し、安全版が実際に選択された場合だけ成功します。
 
 現段階の隔離は一時cloneによるファイル分離です。コマンド実行をOSレベルで隔離するDocker backend、private registry、修正後test、残存CVEスキャン、PR作成は次の実装対象です。

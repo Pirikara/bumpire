@@ -72,12 +72,12 @@ class GitSandbox:
             raise RuntimeError("sandbox is not active")
         return run_command(args, cwd=self.workdir, timeout=timeout)
 
-    def package_command(
+    def isolated_command(
         self,
         args: list[str],
         *,
-        manifest: Path,
         timeout: int = 300,
+        extra_env: dict[str, str] | None = None,
     ) -> CommandResult:
         """Run a package manager without loading tool config from the cloned repo."""
         if self.clone_root is None:
@@ -86,7 +86,7 @@ class GitSandbox:
             args,
             cwd=self.clone_root.parent,
             timeout=timeout,
-            extra_env={"BUNDLE_GEMFILE": str(manifest)},
+            extra_env=extra_env,
         )
 
     def stage(self, paths: list[str]) -> CommandResult:

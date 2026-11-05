@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from depfix.bundler import BundlerAdapter
+from depfix.adapters import DependencyAdapter
 from depfix.events import EventLogger
 from depfix.models import DependencyIssue, FixResult, PlanningContext
 from depfix.planner import Planner, PlanningExhaustedError
@@ -11,7 +11,7 @@ from depfix.planner import Planner, PlanningExhaustedError
 class AutofixEngine:
     def __init__(
         self,
-        adapter: BundlerAdapter,
+        adapter: DependencyAdapter,
         planner: Planner,
         events: EventLogger,
         *,
@@ -27,7 +27,7 @@ class AutofixEngine:
     async def run(self, issue: DependencyIssue) -> FixResult:
         project = self.adapter.inspect(issue)
         attempts = []
-        seen_plans: set[tuple[tuple[str, str, str], ...]] = set()
+        seen_plans: set[tuple[tuple[str, str, str, str, str], ...]] = set()
 
         for number in range(1, self.max_attempts + 1):
             context = PlanningContext(issue=issue, project=project, attempts=attempts)

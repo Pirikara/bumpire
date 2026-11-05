@@ -22,6 +22,16 @@ class HeuristicPlanner:
     """Small baseline planner that makes the agent loop testable without an API."""
 
     async def propose(self, context: PlanningContext) -> FixPlan:
+        if context.issue.ecosystem == "npm":
+            return self._propose_npm(context)
+        if context.issue.ecosystem == "bundler":
+            return self._propose_bundler(context)
+        raise PlanningExhaustedError(
+            f"no heuristic planner for ecosystem: {context.issue.ecosystem}"
+        )
+
+    @staticmethod
+    def _propose_bundler(context: PlanningContext) -> FixPlan:
         issue = context.issue
         tried = {attempt.plan.fingerprint() for attempt in context.attempts}
 
@@ -37,6 +47,8 @@ class HeuristicPlanner:
                     package=issue.package,
                     requirement=f">= {issue.safe_version}",
                     operation="set" if direct_target else "add",
+                    manifest_path=context.project.manifest_path,
+                    section="dependencies",
                 )
             ],
         )
@@ -56,16 +68,78 @@ class HeuristicPlanner:
                     "pin the vulnerable child so the package manager can resolve the safe graph."
                 ),
                 edits=[
-                    DependencyEdit(package=parent, requirement=issue.safe_version),
+                    DependencyEdit(
+                        package=parent,
+                        requirement=issue.safe_version,
+                        manifest_path=context.project.manifest_path,
+                        section="dependencies",
+                    ),
                     DependencyEdit(
                         package=issue.package,
                         requirement=f">= {issue.safe_version}",
                         operation="add",
+                        manifest_path=context.project.manifest_path,
+                        section="dependencies",
                     ),
                 ],
             )
 
         raise PlanningExhaustedError("no untried direct ancestor strategy remains")
+
+    @staticmethod
+    def _propose_npm(context: PlanningContext) -> FixPlan:
+        issue = context.issue
+        tried = {attempt.plan.fingerprint() for attempt in context.attempts}
+        root_constraint = next(
+            (constraint for constraint in context.project.constraints if constraint.is_root),
+            None,
+        )
+        root_edit = DependencyEdit(
+            package=issue.package,
+            requirement=issue.safe_version,
+            operation="set" if root_constraint else "add",
+            manifest_path=(
+                root_constraint.manifest_path
+                if root_constraint is not None
+                else context.project.manifest_path
+            ),
+            section=root_constraint.section if root_constraint is not None else "dependencies",
+        )
+        direct_plan = FixPlan(
+            rationale=f"Update {issue.package} to the safe version in the root package manifest.",
+            edits=[root_edit],
+        )
+        if direct_plan.fingerprint() not in tried:
+            return direct_plan
+
+        peer_constraints = [
+            constraint
+            for constraint in context.project.constraints
+            if not constraint.is_root and constraint.section == "peerDependencies"
+        ]
+        if peer_constraints:
+            peer_plan = FixPlan(
+                rationale=(
+                    f"Align local peer constraints with {issue.package} {issue.safe_version} "
+                    "after npm rejected the root-only update."
+                ),
+                edits=[
+                    root_edit,
+                    *[
+                        DependencyEdit(
+                            package=issue.package,
+                            requirement=issue.safe_version,
+                            manifest_path=constraint.manifest_path,
+                            section=constraint.section,
+                        )
+                        for constraint in peer_constraints
+                    ],
+                ],
+            )
+            if peer_plan.fingerprint() not in tried:
+                return peer_plan
+
+        raise PlanningExhaustedError("no untried npm peer-constraint strategy remains")
 
 
 class AIPlanner:
@@ -77,13 +151,14 @@ class AIPlanner:
 
     async def propose(self, context: PlanningContext) -> FixPlan:
         instructions = """
-You are a dependency remediation planner. Propose one minimal Gemfile edit plan that
-allows Bundler to select the requested safe package version. You may update top-level
-parent dependencies and add a direct constraint for the vulnerable transitive gem.
-Do not edit source code, remove dependencies, change gem sources, or claim success.
-The deterministic executor will run Bundler and reject invalid plans. Use prior resolver
-errors to choose a materially different plan. Prefer patch/minor parent upgrades before
-major upgrades, unless the safe version requires a major line.
+You are a dependency remediation planner. Propose one minimal dependency-manifest edit
+plan that allows the detected package manager to select the requested safe version.
+For Bundler, you may align top-level parent gems and add a direct constraint. For npm,
+you may update dependency fields in the root or local workspace package.json manifests,
+including peerDependencies when resolver evidence requires it. Use only manifest paths
+present in the planning context. Do not edit source code, remove dependencies, change
+registry sources, or claim success. The deterministic executor runs the package manager
+and rejects invalid plans. Use prior resolver errors to choose a materially different plan.
 """.strip()
         response = await self.client.responses.parse(
             model=self.model,

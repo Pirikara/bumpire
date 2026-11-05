@@ -8,12 +8,12 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class DependencyIssue(BaseModel):
-    ecosystem: Literal["bundler"] = "bundler"
+    ecosystem: str
     package: str
     safe_version: str
     advisory_id: str | None = None
 
-    @field_validator("package", "safe_version")
+    @field_validator("ecosystem", "package", "safe_version")
     @classmethod
     def non_empty_single_line(cls, value: str) -> str:
         value = value.strip()
@@ -26,10 +26,12 @@ class DependencyEdit(BaseModel):
     package: str
     requirement: str
     operation: Literal["set", "add"] = "set"
+    manifest_path: str | None = None
+    section: str | None = None
 
     @field_validator("package", "requirement")
     @classmethod
-    def safe_gemfile_value(cls, value: str) -> str:
+    def safe_manifest_value(cls, value: str) -> str:
         value = value.strip()
         if not value or any(char in value for char in ("\n", "\r", '"', "'")):
             raise ValueError("must be a non-empty quote-free single-line value")
@@ -41,20 +43,38 @@ class FixPlan(BaseModel):
     edits: list[DependencyEdit] = Field(min_length=1, max_length=8)
 
     @model_validator(mode="after")
-    def unique_packages(self) -> FixPlan:
-        packages = [edit.package for edit in self.edits]
-        if len(packages) != len(set(packages)):
-            raise ValueError("a plan may edit each package at most once")
+    def unique_edit_targets(self) -> FixPlan:
+        targets = [(edit.manifest_path, edit.section, edit.package) for edit in self.edits]
+        if len(targets) != len(set(targets)):
+            raise ValueError("a plan may edit each manifest dependency at most once")
         return self
 
-    def fingerprint(self) -> tuple[tuple[str, str, str], ...]:
+    def fingerprint(self) -> tuple[tuple[str, str, str, str, str], ...]:
         return tuple(
-            sorted((edit.package, edit.requirement, edit.operation) for edit in self.edits)
+            sorted(
+                (
+                    edit.manifest_path or "",
+                    edit.section or "",
+                    edit.package,
+                    edit.requirement,
+                    edit.operation,
+                )
+                for edit in self.edits
+            )
         )
 
 
+class DependencyConstraint(BaseModel):
+    package: str
+    requirement: str
+    manifest_path: str
+    section: str
+    is_root: bool = False
+
+
 class ProjectState(BaseModel):
-    ecosystem: Literal["bundler"] = "bundler"
+    ecosystem: str
+    package_manager: str
     manifest_path: str
     lockfile_path: str
     manifest_text: str
@@ -62,6 +82,7 @@ class ProjectState(BaseModel):
     locked_versions: dict[str, str]
     paths_to_target: list[list[str]]
     target_locked_version: str | None
+    constraints: list[DependencyConstraint] = Field(default_factory=list)
 
 
 class AttemptResult(BaseModel):

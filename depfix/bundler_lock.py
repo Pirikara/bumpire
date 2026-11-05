@@ -88,6 +88,8 @@ class BundlerLock:
         target: str,
     ) -> ProjectState:
         return ProjectState(
+            ecosystem="bundler",
+            package_manager="bundler",
             manifest_path=manifest_path,
             lockfile_path=lockfile_path,
             manifest_text=manifest_text,

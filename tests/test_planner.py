@@ -12,8 +12,14 @@ from depfix.planner import HeuristicPlanner
 
 def _context(attempts: list[AttemptResult]) -> PlanningContext:
     return PlanningContext(
-        issue=DependencyIssue(package="activestorage", safe_version="7.2.3.2"),
+        issue=DependencyIssue(
+            ecosystem="bundler",
+            package="activestorage",
+            safe_version="7.2.3.2",
+        ),
         project=ProjectState(
+            ecosystem="bundler",
+            package_manager="bundler",
             manifest_path="rails/Gemfile",
             lockfile_path="rails/Gemfile.lock",
             manifest_text='gem "rails", "7.2.3.1"',

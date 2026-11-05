@@ -9,7 +9,7 @@ import os
 import sys
 from pathlib import Path
 
-from depfix.bundler import BundlerAdapter
+from depfix.adapters import create_adapter
 from depfix.engine import AutofixEngine
 from depfix.events import EventLogger
 from depfix.models import DependencyIssue
@@ -22,6 +22,11 @@ def _parser() -> argparse.ArgumentParser:
     preview = subcommands.add_parser("preview", help="generate a verified dependency-fix diff")
     preview.add_argument("--repo", type=Path, required=True)
     preview.add_argument("--workspace", default=".")
+    preview.add_argument(
+        "--ecosystem",
+        choices=("auto", "bundler", "npm"),
+        default="auto",
+    )
     preview.add_argument("--package", required=True)
     preview.add_argument("--safe-version", required=True)
     preview.add_argument("--advisory-id")
@@ -40,12 +45,13 @@ async def _preview(args: argparse.Namespace) -> int:
         raise ValueError(f"--repo must be a Git repository: {repo}")
 
     planner = AIPlanner(args.model) if args.planner == "ai" else HeuristicPlanner()
+    adapter = create_adapter(repo, args.workspace, events, args.ecosystem)
     issue = DependencyIssue(
+        ecosystem=adapter.ecosystem,
         package=args.package,
         safe_version=args.safe_version,
         advisory_id=args.advisory_id,
     )
-    adapter = BundlerAdapter(repo, args.workspace, events)
     result = await AutofixEngine(
         adapter,
         planner,

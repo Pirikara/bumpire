@@ -15,6 +15,7 @@ from depfix.sandbox import GitSandbox
 
 
 class BundlerAdapter:
+    ecosystem = "bundler"
     manifest_name = "Gemfile"
     lockfile_name = "Gemfile.lock"
 
@@ -24,6 +25,8 @@ class BundlerAdapter:
         self.events = events
 
     def inspect(self, issue: DependencyIssue) -> ProjectState:
+        if issue.ecosystem != self.ecosystem:
+            raise ValueError(f"Bundler adapter cannot handle {issue.ecosystem}")
         workdir = (self.repo / self.workspace).resolve()
         if not workdir.is_relative_to(self.repo) or not workdir.is_dir():
             raise ValueError(f"workspace does not exist: {self.workspace}")
@@ -37,8 +40,8 @@ class BundlerAdapter:
         lock = BundlerLock.parse(lockfile.read_text(encoding="utf-8"))
         self.events.emit("lockfile", "Checking Bundler lockfile versions")
         return lock.project_state(
-            manifest_path=str(Path(self.workspace) / self.manifest_name),
-            lockfile_path=str(Path(self.workspace) / self.lockfile_name),
+            manifest_path=self.manifest_name,
+            lockfile_path=self.lockfile_name,
             manifest_text=manifest_text,
             target=issue.package,
         )
@@ -83,7 +86,11 @@ class BundlerAdapter:
 
             command = self._bundle_command(before_lock)
             self.events.emit("resolve", f"Updating {issue.package} in lockfile")
-            resolved = sandbox.package_command(command, manifest=manifest_path, timeout=600)
+            resolved = sandbox.isolated_command(
+                command,
+                timeout=600,
+                extra_env={"BUNDLE_GEMFILE": str(manifest_path)},
+            )
             if not resolved.ok:
                 return AttemptResult(
                     number=attempt_number,
