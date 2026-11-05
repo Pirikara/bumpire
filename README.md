@@ -6,7 +6,7 @@ LLMは、許可されたdependency manifestを読み、「どのファイルを�
 
 このツールの責務は、安全版へ解決できる最小の依存関係差分を生成し、レビュー可能なPRとして提出するところまでです。アプリケーションのtest、lint、build、互換性判定は導入先リポジトリの既存CIへ委ねます。
 
-現在のMVPはnpmとBundlerをTOML profileで自動検出します。`--planner agent`はpackage manager共通のmanifest replacement toolを使う主実験経路で、モデルproviderはLiteLLM経由で選択します。API不要の`heuristic`と、従来のPython adapterを使う`adapter-agent`も比較用に残しています。
+現在のMVPはnpmとBundlerをTOML profileで自動検出します。package manager共通のmanifest replacement toolをagentが呼び、モデルproviderはLiteLLM経由で選択します。package manager固有のPython adapterは持ちません。
 
 ## Architecture
 
@@ -19,10 +19,7 @@ PreviewOrchestrator
 │   ├── runtime image + resolver procedure
 │   └── resolved-version probe
 ├── planner
-│   ├── generic Agents SDK + LiteLLM (primary experiment)
-│   ├── heuristic + Python adapter (baseline)
-│   ├── adapter-agent (legacy comparison)
-│   └── OpenAI structured planner (legacy experiment)
+│   └── Agents SDK + LiteLLM
 └── verification gate
     ├── dependency graph resolves
     ├── target version is safe
@@ -30,9 +27,9 @@ PreviewOrchestrator
     └── staged diff is reviewable
 ```
 
-各試行は新しいcloneと一時コンテナで実行されます。元のリポジトリは変更しません。成功時はstaged diffをpreviewとして返します。Dockerを使えない開発環境では`--sandbox local`で従来のhost実行へ切り替えられます。
+各試行は新しいcloneと一時コンテナで実行されます。元のリポジトリは変更しません。成功時はstaged diffをpreviewとして返します。resolverは常にDocker内で実行します。
 
-`--planner agent`のコアはpackage manager非依存です。agentにはprofileが許可した既存manifestの内容だけを渡し、agentは変更するmanifestの全文をtoolへ返します。共通executorはそれを新しいcloneへ書き、profile内の信頼済みresolver手順をDockerで実行し、安全版と変更ファイルを検証します。agentはimage、shell command、lockfile、成功条件を変更できません。
+agent loopのコアはpackage manager非依存です。agentにはprofileが許可した既存manifestの内容だけを渡し、agentは変更するmanifestの全文をtoolへ返します。共通executorはそれを新しいcloneへ書き、profile内の信頼済みresolver手順をDockerで実行し、安全版と変更ファイルを検証します。agentはimage、shell command、lockfile、成功条件を変更できません。
 
 新しいpackage managerは原則として`depfix/profiles/*.toml`を追加します。profileに必要なのは次の情報です。
 
@@ -67,11 +64,11 @@ uv run depfix preview \
   --repo ../aikido-peer-dependency-repro \
   --package lodash \
   --safe-version 4.18.1 \
-  --planner heuristic \
+  --model openrouter/openrouter/free \
   --output npm-peer.patch
 ```
 
-このfixtureではrootの`lodash`だけを更新する最初の試行が`ERESOLVE`になります。2回目はローカルpackageの`peerDependencies`も同じ安全版へ揃えます。生成差分はAikido PR #2と一致する3ファイルです。
+このfixtureではagentがrootの`lodash`とローカルpackageの`peerDependencies`を同じ安全版へ揃えます。生成差分はAikido PR #2と一致する3ファイルです。
 
 ## Rails / Active Storage example
 
@@ -82,18 +79,16 @@ uv run depfix preview \
   --workspace rails-activestorage \
   --package activestorage \
   --safe-version 7.2.3.2 \
-  --planner heuristic \
+  --model openrouter/openrouter/free \
   --output activestorage.patch
 ```
 
-この例では、最初にActive Storage単体のpinを試します。Bundlerが`rails (= 7.2.3.1)`との競合を返すと、次の試行で直接依存のRailsも`7.2.3.2`へ更新します。
+この例では、agentがGemfileとprofile guidanceから、Active Storage単体ではなく直接依存のRailsを`7.2.3.2`へ更新します。
 
 確認済みの実行結果:
 
 ```text
-attempt 1: activestorage >= 7.2.3.2
-           -> rails 7.2.3.1との競合で失敗
-attempt 2: rails 7.2.3.2 + activestorage >= 7.2.3.2
+attempt 1: rails 7.2.3.2
            -> activestorage 7.2.3.2をlockし、検証成功
 ```
 
@@ -107,13 +102,12 @@ uv run depfix preview \
   --repo ../aikido-peer-dependency-repro \
   --package lodash \
   --safe-version 4.18.1 \
-  --planner agent \
   --model openrouter/openrouter/free
 ```
 
 モデル名はLiteLLM形式です。例えば`gemini/...`、`groq/...`、`ollama_chat/...`などへ同じagent loopを接続できます。provider標準のAPI key環境変数を利用するか、`--api-key-env MY_PROVIDER_KEY`で明示します。OpenAI Agents SDKはtool実行とturn管理に使用しますが、モデルproviderをOpenAIへ固定しません。
 
-従来の構造化edit adapterとの比較には`--planner adapter-agent`を使えます。`--planner agent`は安全上Docker必須です。profile-driven agentはmanifest本文を生成できるぶん柔軟ですが、実行可能なresolver commandは信頼済みprofileに固定されています。
+agentはmanifest本文を生成できるぶん柔軟ですが、実行可能なresolver commandは信頼済みprofileに固定されています。Dockerは安全境界の一部なので必須です。
 
 ## Safety model
 
@@ -127,7 +121,7 @@ uv run depfix preview \
 - plannerが成功を宣言しても終了できません。lockfileが解決し、安全版が実際に選択された場合だけ成功します。
 - resolver成功は依存グラフと安全版の選択だけを証明します。API・挙動・runtime互換性は主張せず、その判定はPR上で動く導入先リポジトリのCIに委ねます。
 
-コンテナのnetworkは現在registry取得に必要な通常のbridge接続です。registry allowlist、private registry認証、残存CVEスキャン、branch作成、push、PR作成、CI statusのPR表示が次の実装対象です。Dockerを明示的に無効化する場合だけ`--sandbox local`を使用してください。
+コンテナのnetworkは現在registry取得に必要な通常のbridge接続です。registry allowlist、private registry認証、残存CVEスキャン、branch作成、push、PR作成、CI statusのPR表示が次の実装対象です。
 
 ## Scope boundary
 

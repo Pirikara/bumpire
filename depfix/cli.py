@@ -9,11 +9,12 @@ import os
 import sys
 from pathlib import Path
 
-from depfix.adapters import create_adapter
-from depfix.engine import AutofixEngine
+from depfix.agent_runtime import AgentAutofixRunner
+from depfix.docker_runtime import DockerRuntime
 from depfix.events import EventLogger
 from depfix.models import DependencyIssue
-from depfix.planner import AIPlanner, HeuristicPlanner
+from depfix.profile import detect_profile
+from depfix.profile_executor import ProfileExecutor
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -24,23 +25,12 @@ def _parser() -> argparse.ArgumentParser:
     preview.add_argument("--workspace", default=".")
     preview.add_argument(
         "--ecosystem",
-        choices=("auto", "bundler", "npm"),
         default="auto",
-    )
-    preview.add_argument(
-        "--sandbox",
-        choices=("docker", "local"),
-        default=os.environ.get("DEPFIX_SANDBOX", "docker"),
-        help="resolver execution backend (default: docker)",
+        help="profile ecosystem to select when auto-detection is ambiguous",
     )
     preview.add_argument("--package", required=True)
     preview.add_argument("--safe-version", required=True)
     preview.add_argument("--advisory-id")
-    preview.add_argument(
-        "--planner",
-        choices=("heuristic", "agent", "adapter-agent", "ai"),
-        default="heuristic",
-    )
     preview.add_argument("--model", default=os.environ.get("DEPFIX_MODEL", ""))
     preview.add_argument("--api-base", default=os.environ.get("DEPFIX_API_BASE"))
     preview.add_argument(
@@ -60,66 +50,24 @@ async def _preview(args: argparse.Namespace) -> int:
     if not (repo / ".git").exists():
         raise ValueError(f"--repo must be a Git repository: {repo}")
 
-    if args.planner == "agent":
-        from depfix.docker_runtime import DockerRuntime
-        from depfix.profile import detect_profile
-        from depfix.profile_adapter import ProfileAdapter
-        from depfix.profile_agent_runtime import ProfileAgentAutofixRunner
-
-        if args.sandbox != "docker":
-            raise ValueError("profile-driven agent execution requires --sandbox docker")
-        profile = detect_profile(repo, args.workspace, args.ecosystem)
-        DockerRuntime.ensure_available()
-        adapter = ProfileAdapter(repo, args.workspace, events, profile)
-        issue = DependencyIssue(
-            ecosystem=profile.ecosystem,
-            package=args.package,
-            safe_version=args.safe_version,
-            advisory_id=args.advisory_id,
-        )
-        result = await ProfileAgentAutofixRunner(
-            adapter,
-            events,
-            model_name=args.model,
-            max_attempts=args.max_attempts,
-            max_turns=args.max_turns,
-            api_key=_api_key(args),
-            base_url=args.api_base,
-        ).run(issue)
-    else:
-        adapter = create_adapter(
-            repo,
-            args.workspace,
-            events,
-            args.ecosystem,
-            args.sandbox,
-        )
-        issue = DependencyIssue(
-            ecosystem=adapter.ecosystem,
-            package=args.package,
-            safe_version=args.safe_version,
-            advisory_id=args.advisory_id,
-        )
-        if args.planner == "adapter-agent":
-            from depfix.agent_runtime import AgentAutofixRunner
-
-            result = await AgentAutofixRunner(
-                adapter,
-                events,
-                model_name=args.model,
-                max_attempts=args.max_attempts,
-                max_turns=args.max_turns,
-                api_key=_api_key(args),
-                base_url=args.api_base,
-            ).run(issue)
-        else:
-            planner = AIPlanner(args.model) if args.planner == "ai" else HeuristicPlanner()
-            result = await AutofixEngine(
-                adapter,
-                planner,
-                events,
-                max_attempts=args.max_attempts,
-            ).run(issue)
+    profile = detect_profile(repo, args.workspace, args.ecosystem)
+    DockerRuntime.ensure_available()
+    executor = ProfileExecutor(repo, args.workspace, events, profile)
+    issue = DependencyIssue(
+        ecosystem=profile.ecosystem,
+        package=args.package,
+        safe_version=args.safe_version,
+        advisory_id=args.advisory_id,
+    )
+    result = await AgentAutofixRunner(
+        executor,
+        events,
+        model_name=args.model,
+        max_attempts=args.max_attempts,
+        max_turns=args.max_turns,
+        api_key=_api_key(args),
+        base_url=args.api_base,
+    ).run(issue)
 
     if args.output and result.diff:
         args.output.write_text(result.diff, encoding="utf-8")

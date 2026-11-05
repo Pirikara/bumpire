@@ -18,7 +18,7 @@ _VERSION_MARKER = re.compile(r"^DEPFIX_RESOLVED_VERSION=(?P<version>.+)$", re.MU
 _MAX_CONTEXT_BYTES = 1_000_000
 
 
-class ProfileAdapter:
+class ProfileExecutor:
     def __init__(
         self,
         repo: Path,
@@ -62,16 +62,10 @@ class ProfileAdapter:
         )
         self.events.emit("manifest", f"Loaded {len(documents)} allowed dependency manifests")
         self.events.emit("lockfile", f"Checking {self.profile.name} lockfile version")
-        first_manifest = next(iter(documents))
         return ProjectState(
             ecosystem=self.ecosystem,
             package_manager=self.profile.name,
-            manifest_path=first_manifest,
             lockfile_path=self.profile.lockfiles[0],
-            manifest_text=documents[first_manifest],
-            direct_dependencies={},
-            locked_versions={},
-            paths_to_target=[],
             target_locked_version=self.profile.locked_version(lock_text, issue.package),
             manifest_documents=documents,
             profile_instructions=self.profile.instructions,

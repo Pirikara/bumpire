@@ -9,7 +9,7 @@ resolution-markers = [
 ]
 
 [options]
-exclude-newer = "2026-11-02T14:26:36.520757Z"
+exclude-newer = "2026-11-02T17:54:54.239237Z"
 exclude-newer-span = "P3D"
 
 [[package]]
@@ -546,7 +546,6 @@ name = "depfix-agent"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "openai" },
     { name = "openai-agents", extra = ["litellm"] },
     { name = "packaging" },
     { name = "pydantic" },
@@ -561,7 +560,6 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "openai", specifier = ">=2.45.0,<3" },
     { name = "openai-agents", extras = ["litellm"], specifier = ">=0.19.0,<0.20" },
     { name = "packaging", specifier = ">=24.0" },
     { name = "pydantic", specifier = ">=2.11.0,<3" },

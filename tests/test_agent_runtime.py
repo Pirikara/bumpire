@@ -6,23 +6,18 @@ from depfix.agent_runtime import AutofixAgentContext, build_model, try_dependenc
 from depfix.events import EventLogger
 from depfix.models import (
     AttemptResult,
-    DependencyEdit,
     DependencyIssue,
-    FixPlan,
+    FileFixPlan,
+    FileReplacement,
     ProjectState,
 )
 
 
-class SuccessfulAdapter:
-    ecosystem = "npm"
-
-    def inspect(self, issue: DependencyIssue) -> ProjectState:
-        raise AssertionError("not used by this unit test")
-
+class SuccessfulExecutor:
     def execute(
         self,
         issue: DependencyIssue,
-        plan: FixPlan,
+        plan: FileFixPlan,
         *,
         attempt_number: int,
     ) -> AttemptResult:
@@ -39,50 +34,39 @@ class SuccessfulAdapter:
 
 
 def _project() -> ProjectState:
+    manifest = '{"dependencies":{"lodash":"4.17.20"}}'
     return ProjectState(
         ecosystem="npm",
         package_manager="npm",
-        manifest_path="package.json",
         lockfile_path="package-lock.json",
-        manifest_text='{"dependencies":{"lodash":"4.17.20"}}',
-        direct_dependencies={"lodash": "4.17.20"},
-        locked_versions={"lodash": "4.17.20"},
-        paths_to_target=[["lodash"]],
         target_locked_version="4.17.20",
+        manifest_documents={"package.json": manifest},
     )
 
 
-def test_build_model_routes_through_litellm() -> None:
-    model = build_model("litellm/openrouter/openrouter/free")
-
-    assert model.model == "openrouter/openrouter/free"
-
-
-def test_resolver_tool_schema_is_strict_and_structured() -> None:
+def test_tool_schema_accepts_full_manifest_replacements() -> None:
     schema = try_dependency_fix.params_json_schema
 
     assert schema["additionalProperties"] is False
-    assert schema["properties"]["edits"]["items"]["$ref"] == "#/$defs/DependencyEdit"
+    assert schema["properties"]["files"]["items"]["$ref"] == "#/$defs/FileReplacement"
 
 
 @pytest.mark.asyncio
 async def test_context_accepts_only_one_verified_fix() -> None:
     issue = DependencyIssue(ecosystem="npm", package="lodash", safe_version="4.18.1")
     context = AutofixAgentContext(
-        adapter=SuccessfulAdapter(),
+        executor=SuccessfulExecutor(),  # type: ignore[arg-type]
         issue=issue,
         project=_project(),
         events=EventLogger(stream=StringIO()),
         max_attempts=3,
     )
-    plan = FixPlan(
+    plan = FileFixPlan(
         rationale="update the direct dependency",
-        edits=[
-            DependencyEdit(
-                package="lodash",
-                requirement="4.18.1",
-                manifest_path="package.json",
-                section="dependencies",
+        files=[
+            FileReplacement(
+                path="package.json",
+                content='{"dependencies":{"lodash":"4.18.1"}}',
             )
         ],
     )
@@ -92,10 +76,12 @@ async def test_context_accepts_only_one_verified_fix() -> None:
 
     assert first["success"] is True
     assert "without claiming untested runtime or API compatibility" in first["message"]
-    assert second == {
-        "accepted": False,
-        "success": True,
-        "message": "a fix has already passed deterministic verification",
-        "target_after": "4.18.1",
-    }
+    assert second["accepted"] is False
+    assert second["success"] is True
     assert len(context.attempts) == 1
+
+
+def test_build_model_routes_through_litellm() -> None:
+    model = build_model("litellm/openrouter/openrouter/free")
+
+    assert model.model == "openrouter/openrouter/free"

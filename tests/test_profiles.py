@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from depfix.profile import detect_profile, load_builtin_profiles
-from depfix.profile_adapter import ProfileAdapter
+from depfix.profile_executor import ProfileExecutor
 
 
 def _profiles_by_name():
@@ -163,4 +163,4 @@ def test_profile_executor_preserves_final_newline(
     replacement: str,
     expected: str,
 ) -> None:
-    assert ProfileAdapter._preserve_final_newline(original, replacement) == expected
+    assert ProfileExecutor._preserve_final_newline(original, replacement) == expected
