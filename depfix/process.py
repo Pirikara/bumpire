@@ -32,18 +32,37 @@ def run_command(
     env = os.environ.copy()
     if extra_env:
         env.update(extra_env)
-    completed = subprocess.run(
-        args,
-        cwd=cwd,
-        env=env,
-        text=True,
-        capture_output=True,
-        timeout=timeout,
-        check=False,
-    )
+    try:
+        completed = subprocess.run(
+            args,
+            cwd=cwd,
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        stdout = _timeout_text(exc.stdout)
+        stderr = _timeout_text(exc.stderr)
+        message = f"command timed out after {timeout} seconds"
+        return CommandResult(
+            args=tuple(args),
+            returncode=124,
+            stdout=stdout[-_OUTPUT_LIMIT:],
+            stderr=f"{stderr}\n{message}".strip()[-_OUTPUT_LIMIT:],
+        )
     return CommandResult(
         args=tuple(args),
         returncode=completed.returncode,
         stdout=completed.stdout[-_OUTPUT_LIMIT:],
         stderr=completed.stderr[-_OUTPUT_LIMIT:],
     )
+
+
+def _timeout_text(value: str | bytes | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode(errors="replace")
+    return value

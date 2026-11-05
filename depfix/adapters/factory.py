@@ -7,6 +7,7 @@ from typing import Literal, cast
 
 from depfix.adapters.base import DependencyAdapter
 from depfix.bundler import BundlerAdapter
+from depfix.docker_runtime import DockerRuntime
 from depfix.events import EventLogger
 from depfix.npm import NpmAdapter
 
@@ -18,7 +19,10 @@ def create_adapter(
     workspace: str,
     events: EventLogger,
     requested: str = "auto",
+    sandbox_backend: Literal["local", "docker"] = "local",
 ) -> DependencyAdapter:
+    if sandbox_backend not in {"local", "docker"}:
+        raise ValueError(f"unsupported sandbox backend: {sandbox_backend}")
     workdir = (repo / workspace).resolve()
     if not workdir.is_relative_to(repo.resolve()) or not workdir.is_dir():
         raise ValueError(f"workspace does not exist: {workspace}")
@@ -42,6 +46,18 @@ def create_adapter(
     else:
         selected = detected
 
+    if sandbox_backend == "docker":
+        DockerRuntime.ensure_available()
     if selected == "npm":
-        return NpmAdapter(repo, workspace, events)
-    return BundlerAdapter(repo, workspace, events)
+        return NpmAdapter(
+            repo,
+            workspace,
+            events,
+            sandbox_backend=sandbox_backend,
+        )
+    return BundlerAdapter(
+        repo,
+        workspace,
+        events,
+        sandbox_backend=sandbox_backend,
+    )

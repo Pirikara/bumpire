@@ -11,6 +11,7 @@ LLMは「どの直接依存や制約を変更するか」を計画します。ma
 ```text
 PreviewOrchestrator
 ├── isolated shallow git clone (hooks disabled)
+├── Docker resolver sandbox (default)
 ├── ecosystem adapter
 │   ├── npm: package.json / package-lock.json
 │   └── Bundler: Gemfile / Gemfile.lock
@@ -25,7 +26,7 @@ PreviewOrchestrator
     └── staged diff is reviewable
 ```
 
-各試行は新しいcloneで実行されます。元のリポジトリは変更しません。成功時はstaged diffをpreviewとして返します。
+各試行は新しいcloneと一時コンテナで実行されます。元のリポジトリは変更しません。成功時はstaged diffをpreviewとして返します。Dockerを使えない開発環境では`--sandbox local`で従来のhost実行へ切り替えられます。
 
 コアのループはpackage manager非依存で、adapter protocolが検出、manifest編集、resolver実行、lockfile読取を担当します。対応ecosystemはadapter単位で増やします。現時点の実装済みadapterはnpmとBundlerで、pnpm、Yarn、Bunは未実装です。
 
@@ -100,9 +101,12 @@ uv run depfix preview \
 
 - 元の作業ツリーではなく、一時cloneだけを編集します。
 - clone、add、diffではGit hooksを無効化します。
+- resolverはデフォルトで一時Dockerコンテナ内に実行します。root filesystemはread-only、Linux capabilitiesは全削除、`no-new-privileges`、PID・memory・CPU上限を設定します。
+- 一時cloneだけをread-write mountし、`.git` metadataは別のread-only mountで保護します。
+- コンテナが作ったstaged、unstaged、untrackedファイルをすべて検査し、allowlist外の変更があれば失敗させます。
 - Bundlerでは`bundle lock`、npmでは`npm install --package-lock-only --ignore-scripts`だけを実行し、アプリケーションコードやtestは自動実行しません。
 - 変更可能なファイルはplannerが指定した依存manifestと、対応するlockfileだけです。
 - plannerが成功を宣言しても終了できません。lockfileが解決し、安全版が実際に選択された場合だけ成功します。
 - resolver成功は依存グラフと安全版の選択だけを証明します。修正後testを実行するまでは、API・挙動・runtime互換性を証明したとは扱いません。
 
-現段階の隔離は一時cloneによるファイル分離です。コマンド実行をOSレベルで隔離するDocker backend、private registry、修正後test、残存CVEスキャン、PR作成は次の実装対象です。
+コンテナのnetworkは現在registry取得に必要な通常のbridge接続です。registry allowlist、private registry認証、修正後test、残存CVEスキャン、PR作成は次の実装対象です。Dockerを明示的に無効化する場合だけ`--sandbox local`を使用してください。

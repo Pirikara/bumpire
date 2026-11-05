@@ -6,10 +6,11 @@ import json
 import re
 import shutil
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Literal
 
 from packaging.version import InvalidVersion, Version
 
+from depfix.docker_runtime import ContainerCommand
 from depfix.events import EventLogger
 from depfix.json_manifest import DEPENDENCY_SECTIONS, apply_dependency_edits, load_json_object
 from depfix.models import (
@@ -29,10 +30,18 @@ class NpmAdapter:
     manifest_name = "package.json"
     lockfile_name = "package-lock.json"
 
-    def __init__(self, repo: Path, workspace: str, events: EventLogger) -> None:
+    def __init__(
+        self,
+        repo: Path,
+        workspace: str,
+        events: EventLogger,
+        *,
+        sandbox_backend: Literal["local", "docker"] = "local",
+    ) -> None:
         self.repo = repo.resolve()
         self.workspace = workspace
         self.events = events
+        self.sandbox_backend = sandbox_backend
 
     def inspect(self, issue: DependencyIssue) -> ProjectState:
         if issue.ecosystem != self.ecosystem:
@@ -74,7 +83,12 @@ class NpmAdapter:
         *,
         attempt_number: int,
     ) -> AttemptResult:
-        with GitSandbox(self.repo, self.workspace, self.events) as sandbox:
+        with GitSandbox(
+            self.repo,
+            self.workspace,
+            self.events,
+            backend=self.sandbox_backend,
+        ) as sandbox:
             assert sandbox.workdir is not None
             manifest_path = sandbox.workdir / self.manifest_name
             lockfile_path = sandbox.workdir / self.lockfile_name
@@ -117,7 +131,11 @@ class NpmAdapter:
             root_manifest = load_json_object(manifest_path)
             command = self._npm_command(root_manifest, sandbox.workdir)
             self.events.emit("resolve", f"Updating {issue.package} in lockfile")
-            resolved = sandbox.isolated_command(command, timeout=600)
+            resolved = sandbox.package_command(
+                command,
+                container=self._npm_container(root_manifest),
+                timeout=600,
+            )
             if not resolved.ok:
                 return AttemptResult(
                     number=attempt_number,
@@ -163,7 +181,7 @@ class NpmAdapter:
                 )
 
             self.events.emit("review", "Reviewing the dependency update")
-            changed_files = sandbox.staged_files()
+            changed_files = sandbox.changed_files()
             allowed = {self._repo_path(path) for path in edited_manifests}
             allowed.add(self._repo_path(self.lockfile_name))
             unexpected = sorted(set(changed_files) - allowed)
@@ -298,6 +316,28 @@ class NpmAdapter:
             "--no-audit",
             "--no-fund",
         ]
+
+    @staticmethod
+    def _npm_container(manifest: dict[str, Any]) -> ContainerCommand:
+        engines = manifest.get("engines")
+        node_version = engines.get("node") if isinstance(engines, dict) else None
+        if not isinstance(node_version, str) or not _EXACT_VERSION.fullmatch(node_version):
+            node_version = "22"
+        return ContainerCommand(
+            image=f"node:{node_version}-bookworm-slim",
+            args=(
+                "npm",
+                "install",
+                "--package-lock-only",
+                "--ignore-scripts",
+                "--no-audit",
+                "--no-fund",
+            ),
+            environment={
+                "npm_config_cache": "/tmp/npm-cache",
+                "npm_config_update_notifier": "false",
+            },
+        )
 
     def _repo_path(self, path: str) -> str:
         return str(PurePosixPath(self.workspace) / PurePosixPath(path))

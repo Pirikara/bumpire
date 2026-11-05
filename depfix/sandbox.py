@@ -5,8 +5,9 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path, PurePosixPath
 from types import TracebackType
-from typing import Self
+from typing import Literal, Self
 
+from depfix.docker_runtime import ContainerCommand, DockerRuntime
 from depfix.events import EventLogger
 from depfix.process import CommandResult, run_command
 
@@ -14,12 +15,22 @@ _GIT = ["git", "-c", "core.hooksPath=/dev/null"]
 
 
 class GitSandbox:
-    def __init__(self, source: Path, workspace: str, events: EventLogger) -> None:
+    def __init__(
+        self,
+        source: Path,
+        workspace: str,
+        events: EventLogger,
+        *,
+        backend: Literal["local", "docker"] = "local",
+    ) -> None:
         self.source = source.resolve()
         self.workspace_rel = PurePosixPath(workspace or ".")
         if self.workspace_rel.is_absolute() or ".." in self.workspace_rel.parts:
             raise ValueError("workspace must be a relative path without '..'")
+        if backend not in {"local", "docker"}:
+            raise ValueError(f"unsupported sandbox backend: {backend}")
         self.events = events
+        self.backend = backend
         self._temporary: tempfile.TemporaryDirectory[str] | None = None
         self.clone_root: Path | None = None
         self.workdir: Path | None = None
@@ -89,6 +100,25 @@ class GitSandbox:
             extra_env=extra_env,
         )
 
+    def package_command(
+        self,
+        local_args: list[str],
+        *,
+        container: ContainerCommand,
+        timeout: int = 300,
+        local_env: dict[str, str] | None = None,
+    ) -> CommandResult:
+        if self.clone_root is None:
+            raise RuntimeError("sandbox is not active")
+        if self.backend == "docker":
+            return DockerRuntime(self.events).run(
+                container,
+                clone_root=self.clone_root,
+                workspace=self.workspace_rel,
+                timeout=timeout,
+            )
+        return self.isolated_command(local_args, timeout=timeout, extra_env=local_env)
+
     def stage(self, paths: list[str]) -> CommandResult:
         if self.clone_root is None:
             raise RuntimeError("sandbox is not active")
@@ -107,6 +137,23 @@ class GitSandbox:
         if not result.ok:
             raise RuntimeError(result.stderr)
         return [line for line in result.stdout.splitlines() if line]
+
+    def changed_files(self) -> list[str]:
+        """Return every staged, unstaged, or untracked path in the disposable clone."""
+        if self.clone_root is None:
+            raise RuntimeError("sandbox is not active")
+        commands = (
+            [*_GIT, "diff", "--cached", "--name-only"],
+            [*_GIT, "diff", "--name-only"],
+            [*_GIT, "ls-files", "--others"],
+        )
+        changed: set[str] = set()
+        for command in commands:
+            result = run_command(command, cwd=self.clone_root)
+            if not result.ok:
+                raise RuntimeError(result.stderr)
+            changed.update(line for line in result.stdout.splitlines() if line)
+        return sorted(changed)
 
     def staged_diff(self) -> str:
         if self.clone_root is None:

@@ -27,6 +27,12 @@ def _parser() -> argparse.ArgumentParser:
         choices=("auto", "bundler", "npm"),
         default="auto",
     )
+    preview.add_argument(
+        "--sandbox",
+        choices=("docker", "local"),
+        default=os.environ.get("DEPFIX_SANDBOX", "docker"),
+        help="resolver execution backend (default: docker)",
+    )
     preview.add_argument("--package", required=True)
     preview.add_argument("--safe-version", required=True)
     preview.add_argument("--advisory-id")
@@ -54,7 +60,13 @@ async def _preview(args: argparse.Namespace) -> int:
     if not (repo / ".git").exists():
         raise ValueError(f"--repo must be a Git repository: {repo}")
 
-    adapter = create_adapter(repo, args.workspace, events, args.ecosystem)
+    adapter = create_adapter(
+        repo,
+        args.workspace,
+        events,
+        args.ecosystem,
+        args.sandbox,
+    )
     issue = DependencyIssue(
         ecosystem=adapter.ecosystem,
         package=args.package,
