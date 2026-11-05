@@ -4,6 +4,8 @@
 
 LLMは「どの直接依存や制約を変更するか」を計画します。manifest編集、パッケージマネージャーの実行、lockfile確認、終了判定は決定論的なコードが担当します。
 
+このツールの責務は、安全版へ解決できる最小の依存関係差分を生成し、レビュー可能なPRとして提出するところまでです。アプリケーションのtest、lint、build、互換性判定は導入先リポジトリの既存CIへ委ねます。
+
 現在のMVPはnpmとBundlerを自動検出します。デフォルトはAPI不要のヒューリスティックplannerで、npmのローカルpeer dependencyや、Railsのようにコンポーネントを同一バージョンへ固定する構成を処理できます。`--planner agent`ではOpenAI Agents SDKのtool loopを使い、モデルproviderはLiteLLM経由で選択します。
 
 ## Architecture
@@ -107,6 +109,21 @@ uv run depfix preview \
 - Bundlerでは`bundle lock`、npmでは`npm install --package-lock-only --ignore-scripts`だけを実行し、アプリケーションコードやtestは自動実行しません。
 - 変更可能なファイルはplannerが指定した依存manifestと、対応するlockfileだけです。
 - plannerが成功を宣言しても終了できません。lockfileが解決し、安全版が実際に選択された場合だけ成功します。
-- resolver成功は依存グラフと安全版の選択だけを証明します。修正後testを実行するまでは、API・挙動・runtime互換性を証明したとは扱いません。
+- resolver成功は依存グラフと安全版の選択だけを証明します。API・挙動・runtime互換性は主張せず、その判定はPR上で動く導入先リポジトリのCIに委ねます。
 
-コンテナのnetworkは現在registry取得に必要な通常のbridge接続です。registry allowlist、private registry認証、修正後test、残存CVEスキャン、PR作成は次の実装対象です。Dockerを明示的に無効化する場合だけ`--sandbox local`を使用してください。
+コンテナのnetworkは現在registry取得に必要な通常のbridge接続です。registry allowlist、private registry認証、残存CVEスキャン、branch作成、push、PR作成、CI statusのPR表示が次の実装対象です。Dockerを明示的に無効化する場合だけ`--sandbox local`を使用してください。
+
+## Scope boundary
+
+このツールが成功として扱う範囲:
+
+- manifestとlockfileが安全版へ解決できる
+- 変更ファイルがallowlist内である
+- レビュー可能な差分とPRを作成できる
+
+導入先リポジトリのCIが判定する範囲:
+
+- unit／integration test
+- lint、typecheck、build
+- アプリケーション固有のAPI・挙動・runtime互換性
+- deploy可能性
