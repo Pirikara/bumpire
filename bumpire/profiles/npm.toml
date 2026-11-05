@@ -17,13 +17,13 @@ resolver_script = '''
 mkdir -p "$HOME" /tmp/npm-cache
 export npm_config_cache=/tmp/npm-cache
 export npm_config_update_notifier=false
-if [ -n "${DEPFIX_MANAGER_VERSION:-}" ]; then
-  npm install --global --prefix /tmp/npm-global "npm@${DEPFIX_MANAGER_VERSION}" --ignore-scripts --no-audit --no-fund
+if [ -n "${BUMPIRE_MANAGER_VERSION:-}" ]; then
+  npm install --global --prefix /tmp/npm-global "npm@${BUMPIRE_MANAGER_VERSION}" --ignore-scripts --no-audit --no-fund
   export PATH="/tmp/npm-global/bin:$PATH"
 fi
 npm install --package-lock-only --ignore-scripts --no-audit --no-fund
-resolved=$(node -e 'const fs=require("fs"); const lock=JSON.parse(fs.readFileSync("package-lock.json","utf8")); const p=process.argv[1]; const item=(lock.packages||{})["node_modules/"+p] || (lock.dependencies||{})[p]; if(!item || !item.version) process.exit(2); process.stdout.write(item.version)' "$DEPFIX_PACKAGE")
-printf 'DEPFIX_RESOLVED_VERSION=%s\n' "$resolved"
+resolved=$(node -e 'const fs=require("fs"); const lock=JSON.parse(fs.readFileSync("package-lock.json","utf8")); const p=process.argv[1]; const item=(lock.packages||{})["node_modules/"+p] || (lock.dependencies||{})[p]; if(!item || !item.version) process.exit(2); process.stdout.write(item.version)' "$BUMPIRE_PACKAGE")
+printf 'BUMPIRE_RESOLVED_VERSION=%s\n' "$resolved"
 '''
 
 [manifest_policy]

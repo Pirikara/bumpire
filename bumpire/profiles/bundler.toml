@@ -17,14 +17,14 @@ resolver_script = '''
 mkdir -p "$HOME" /tmp/gems
 export GEM_HOME=/tmp/gems
 export PATH="$GEM_HOME/bin:$PATH"
-if [ -n "${DEPFIX_MANAGER_VERSION:-}" ]; then
-  gem install bundler --version "$DEPFIX_MANAGER_VERSION" --no-document
-  bundle "_${DEPFIX_MANAGER_VERSION}_" lock
+if [ -n "${BUMPIRE_MANAGER_VERSION:-}" ]; then
+  gem install bundler --version "$BUMPIRE_MANAGER_VERSION" --no-document
+  bundle "_${BUMPIRE_MANAGER_VERSION}_" lock
 else
   bundle lock
 fi
-resolved=$(ruby -e 'name=ARGV[0]; line=File.readlines("Gemfile.lock").find { |item| item.match?(/^    #{Regexp.escape(name)} \([^)]+\)$/) }; exit 2 unless line; print line[/\(([^)]+)\)/,1]' "$DEPFIX_PACKAGE")
-printf 'DEPFIX_RESOLVED_VERSION=%s\n' "$resolved"
+resolved=$(ruby -e 'name=ARGV[0]; line=File.readlines("Gemfile.lock").find { |item| item.match?(/^    #{Regexp.escape(name)} \([^)]+\)$/) }; exit 2 unless line; print line[/\(([^)]+)\)/,1]' "$BUMPIRE_PACKAGE")
+printf 'BUMPIRE_RESOLVED_VERSION=%s\n' "$resolved"
 '''
 
 [manifest_policy]

@@ -7,9 +7,9 @@ from pathlib import Path, PurePosixPath
 from types import TracebackType
 from typing import Literal, Self
 
-from depfix.docker_runtime import ContainerCommand, DockerRuntime
-from depfix.events import EventLogger
-from depfix.process import CommandResult, run_command
+from bumpire.docker_runtime import ContainerCommand, DockerRuntime
+from bumpire.events import EventLogger
+from bumpire.process import CommandResult, run_command
 
 _GIT = ["git", "-c", "core.hooksPath=/dev/null"]
 
@@ -37,7 +37,7 @@ class GitSandbox:
 
     def __enter__(self) -> Self:
         self.events.emit("sandbox", "Creating isolated workspace for AutoFix")
-        self._temporary = tempfile.TemporaryDirectory(prefix="depfix-")
+        self._temporary = tempfile.TemporaryDirectory(prefix="bumpire-")
         destination = Path(self._temporary.name) / "repository"
         clone_args = [*_GIT, "clone", "--depth", "1"]
         if self.source.exists():
@@ -58,8 +58,8 @@ class GitSandbox:
             raise ValueError(f"workspace does not exist in clone: {self.workspace_rel}")
 
         for key, value in (
-            ("user.name", "depfix-agent[bot]"),
-            ("user.email", "depfix-agent[bot]@users.noreply.github.com"),
+            ("user.name", "bumpire[bot]"),
+            ("user.email", "bumpire[bot]@users.noreply.github.com"),
             ("core.hooksPath", "/dev/null"),
         ):
             configured = run_command([*_GIT, "config", key, value], cwd=destination)

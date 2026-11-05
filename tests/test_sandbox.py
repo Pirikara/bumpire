@@ -1,8 +1,8 @@
 import subprocess
 from io import StringIO
 
-from depfix.events import EventLogger
-from depfix.sandbox import GitSandbox
+from bumpire.events import EventLogger
+from bumpire.sandbox import GitSandbox
 
 
 def _git(repo, *args: str) -> None:

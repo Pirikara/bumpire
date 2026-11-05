@@ -9,16 +9,16 @@ import os
 import sys
 from pathlib import Path
 
-from depfix.agent_runtime import AgentAutofixRunner
-from depfix.docker_runtime import DockerRuntime
-from depfix.events import EventLogger
-from depfix.models import DependencyIssue
-from depfix.profile import detect_profile
-from depfix.profile_executor import ProfileExecutor
+from bumpire.agent_runtime import AgentAutofixRunner
+from bumpire.docker_runtime import DockerRuntime
+from bumpire.events import EventLogger
+from bumpire.models import DependencyIssue
+from bumpire.profile import detect_profile
+from bumpire.profile_executor import ProfileExecutor
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="depfix")
+    parser = argparse.ArgumentParser(prog="bumpire")
     subcommands = parser.add_subparsers(dest="command", required=True)
     preview = subcommands.add_parser("preview", help="generate a verified dependency-fix diff")
     preview.add_argument("--repo", type=Path, required=True)
@@ -31,8 +31,8 @@ def _parser() -> argparse.ArgumentParser:
     preview.add_argument("--package", required=True)
     preview.add_argument("--safe-version", required=True)
     preview.add_argument("--advisory-id")
-    preview.add_argument("--model", default=os.environ.get("DEPFIX_MODEL", ""))
-    preview.add_argument("--api-base", default=os.environ.get("DEPFIX_API_BASE"))
+    preview.add_argument("--model", default=os.environ.get("BUMPIRE_MODEL", ""))
+    preview.add_argument("--api-base", default=os.environ.get("BUMPIRE_API_BASE"))
     preview.add_argument(
         "--api-key-env",
         help="read an explicit LiteLLM API key from this environment variable",
@@ -112,7 +112,7 @@ def main() -> None:
     try:
         code = asyncio.run(_preview(args))
     except (OSError, RuntimeError, ValueError) as exc:
-        print(f"depfix: {exc}", file=sys.stderr)
+        print(f"bumpire: {exc}", file=sys.stderr)
         code = 1
     raise SystemExit(code)
 

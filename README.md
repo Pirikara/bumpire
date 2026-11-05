@@ -1,6 +1,6 @@
-# depfix-agent
+# Bumpire
 
-依存関係の脆弱性修正を、隔離したclone上で計画・実行・検証するエージェントループの実験実装です。
+依存関係をbumpし、その判定を取り仕切るagentic dependency updaterです。脆弱性修正を、隔離したclone上で計画・実行・検証します。
 
 LLMは、許可されたdependency manifestを読み、「どのファイルをどう変更するか」を計画します。package managerの検出条件、許可manifest、resolver環境、lockfile確認方法は宣言的なTOML profileで与えます。コマンド実行、変更範囲、安全版、終了判定は共通の決定論的コードが担当します。
 
@@ -31,7 +31,7 @@ PreviewOrchestrator
 
 agent loopのコアはpackage manager非依存です。agentにはprofileが許可した既存manifestの内容だけを渡し、agentは変更するmanifestの全文をtoolへ返します。共通executorはそれを新しいcloneへ書き、profile内の信頼済みresolver手順をDockerで実行し、安全版と変更ファイルを検証します。agentはimage、shell command、lockfile、成功条件を変更できません。
 
-新しいpackage managerは原則として`depfix/profiles/*.toml`を追加します。profileに必要なのは次の情報です。
+新しいpackage managerは原則として`bumpire/profiles/*.toml`を追加します。profileに必要なのは次の情報です。
 
 - workspaceの検出条件とmanifest glob
 - manifest内で変更可能なdependency領域
@@ -60,7 +60,7 @@ agent loopのコアはpackage manager非依存です。agentにはprofileが許�
 ## npm peer dependency example
 
 ```sh
-uv run depfix preview \
+uv run bumpire preview \
   --repo ../aikido-peer-dependency-repro \
   --package lodash \
   --safe-version 4.18.1 \
@@ -74,7 +74,7 @@ uv run depfix preview \
 
 ```sh
 uv sync
-uv run depfix preview \
+uv run bumpire preview \
   --repo ../aikido-peer-dependency-repro \
   --workspace rails-activestorage \
   --package activestorage \
@@ -98,7 +98,7 @@ OpenRouterの無料モデルルーターを使う場合:
 
 ```sh
 export OPENROUTER_API_KEY=...
-uv run depfix preview \
+uv run bumpire preview \
   --repo ../aikido-peer-dependency-repro \
   --package lodash \
   --safe-version 4.18.1 \

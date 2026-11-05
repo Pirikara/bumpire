@@ -1,6 +1,6 @@
 import subprocess
 
-from depfix.process import run_command
+from bumpire.process import run_command
 
 
 def test_timeout_becomes_bounded_command_result(monkeypatch, tmp_path) -> None:

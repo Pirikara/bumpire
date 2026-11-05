@@ -2,9 +2,9 @@ from io import StringIO
 
 import pytest
 
-from depfix.agent_runtime import AutofixAgentContext, build_model, try_dependency_fix
-from depfix.events import EventLogger
-from depfix.models import (
+from bumpire.agent_runtime import AutofixAgentContext, build_model, try_dependency_fix
+from bumpire.events import EventLogger
+from bumpire.models import (
     AttemptResult,
     DependencyIssue,
     FileFixPlan,

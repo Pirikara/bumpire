@@ -9,8 +9,8 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
-from depfix.events import EventLogger
-from depfix.process import CommandResult, run_command
+from bumpire.events import EventLogger
+from bumpire.process import CommandResult, run_command
 
 _IMAGE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/:@+-]*$")
 _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -50,7 +50,7 @@ class DockerRuntime:
         workspace: PurePosixPath,
         timeout: int,
     ) -> CommandResult:
-        container_name = f"depfix-{uuid.uuid4().hex[:16]}"
+        container_name = f"bumpire-{uuid.uuid4().hex[:16]}"
         args = self.build_command(
             command,
             clone_root=clone_root,
@@ -124,9 +124,9 @@ class DockerRuntime:
             "--workdir",
             container_workdir.as_posix(),
             "--env",
-            "HOME=/tmp/depfix-home",
+            "HOME=/tmp/bumpire-home",
             "--label",
-            "dev.depfix.ephemeral=true",
+            "dev.bumpire.ephemeral=true",
         ]
         for name, value in sorted(command.environment.items()):
             if not _ENV_NAME.fullmatch(name) or "\x00" in value:

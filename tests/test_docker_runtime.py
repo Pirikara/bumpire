@@ -2,7 +2,7 @@ from pathlib import PurePosixPath
 
 import pytest
 
-from depfix.docker_runtime import ContainerCommand, DockerRuntime
+from bumpire.docker_runtime import ContainerCommand, DockerRuntime
 
 
 def test_docker_command_has_isolation_boundaries(tmp_path) -> None:
@@ -18,15 +18,16 @@ def test_docker_command_has_isolation_boundaries(tmp_path) -> None:
         command,
         clone_root=clone,
         workspace=PurePosixPath("web"),
-        container_name="depfix-test",
+        container_name="bumpire-test",
     )
 
-    assert args[args.index("--name") + 1] == "depfix-test"
+    assert args[args.index("--name") + 1] == "bumpire-test"
     assert "--read-only" in args
     assert args[args.index("--cap-drop") + 1] == "ALL"
     assert args[args.index("--security-opt") + 1] == "no-new-privileges"
     assert args[args.index("--network") + 1] == "bridge"
     assert args[args.index("--workdir") + 1] == "/workspace/web"
+    assert "dev.bumpire.ephemeral=true" in args
     assert f"type=bind,src={clone.resolve()},dst=/workspace" in args
     assert f"type=bind,src={(clone / '.git').resolve()},dst=/workspace/.git,readonly" in args
     assert args[-5:] == [

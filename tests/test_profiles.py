@@ -3,8 +3,8 @@ from pathlib import Path
 
 import pytest
 
-from depfix.profile import detect_profile, load_builtin_profiles
-from depfix.profile_executor import ProfileExecutor
+from bumpire.profile import detect_profile, load_builtin_profiles
+from bumpire.profile_executor import ProfileExecutor
 
 
 def _profiles_by_name():

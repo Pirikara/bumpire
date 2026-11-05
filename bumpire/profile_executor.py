@@ -8,13 +8,13 @@ from typing import Literal
 
 from packaging.version import InvalidVersion, Version
 
-from depfix.docker_runtime import ContainerCommand
-from depfix.events import EventLogger
-from depfix.models import AttemptResult, DependencyIssue, FileFixPlan, ProjectState
-from depfix.profile import PackageManagerProfile
-from depfix.sandbox import GitSandbox
+from bumpire.docker_runtime import ContainerCommand
+from bumpire.events import EventLogger
+from bumpire.models import AttemptResult, DependencyIssue, FileFixPlan, ProjectState
+from bumpire.profile import PackageManagerProfile
+from bumpire.sandbox import GitSandbox
 
-_VERSION_MARKER = re.compile(r"^DEPFIX_RESOLVED_VERSION=(?P<version>.+)$", re.MULTILINE)
+_VERSION_MARKER = re.compile(r"^BUMPIRE_RESOLVED_VERSION=(?P<version>.+)$", re.MULTILINE)
 _MAX_CONTEXT_BYTES = 1_000_000
 
 
@@ -132,11 +132,11 @@ class ProfileExecutor:
                 ["false"],
                 container=ContainerCommand(
                     image=self.profile.image(sandbox.workdir),
-                    args=("sh", "-ceu", self.profile.resolver_script, "depfix-profile"),
+                    args=("sh", "-ceu", self.profile.resolver_script, "bumpire-profile"),
                     environment={
-                        "DEPFIX_PACKAGE": issue.package,
-                        "DEPFIX_SAFE_VERSION": issue.safe_version,
-                        "DEPFIX_MANAGER_VERSION": self.profile.manager_version(sandbox.workdir),
+                        "BUMPIRE_PACKAGE": issue.package,
+                        "BUMPIRE_SAFE_VERSION": issue.safe_version,
+                        "BUMPIRE_MANAGER_VERSION": self.profile.manager_version(sandbox.workdir),
                     },
                 ),
                 timeout=600,

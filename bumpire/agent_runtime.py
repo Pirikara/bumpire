@@ -17,8 +17,8 @@ from agents import (
 )
 from agents.extensions.models.litellm_model import LitellmModel
 
-from depfix.events import EventLogger
-from depfix.models import (
+from bumpire.events import EventLogger
+from bumpire.models import (
     AttemptResult,
     DependencyIssue,
     FileFixPlan,
@@ -26,7 +26,7 @@ from depfix.models import (
     FixResult,
     ProjectState,
 )
-from depfix.profile_executor import ProfileExecutor
+from bumpire.profile_executor import ProfileExecutor
 
 _OBSERVATION_LIMIT = 6_000
 
