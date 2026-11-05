@@ -30,9 +30,19 @@ def _parser() -> argparse.ArgumentParser:
     preview.add_argument("--package", required=True)
     preview.add_argument("--safe-version", required=True)
     preview.add_argument("--advisory-id")
-    preview.add_argument("--planner", choices=("heuristic", "ai"), default="heuristic")
+    preview.add_argument(
+        "--planner",
+        choices=("heuristic", "agent", "ai"),
+        default="heuristic",
+    )
     preview.add_argument("--model", default=os.environ.get("DEPFIX_MODEL", ""))
+    preview.add_argument("--api-base", default=os.environ.get("DEPFIX_API_BASE"))
+    preview.add_argument(
+        "--api-key-env",
+        help="read an explicit LiteLLM API key from this environment variable",
+    )
     preview.add_argument("--max-attempts", type=int, default=5)
+    preview.add_argument("--max-turns", type=int, default=12)
     preview.add_argument("--output", type=Path)
     preview.add_argument("--json", action="store_true")
     return parser
@@ -44,7 +54,6 @@ async def _preview(args: argparse.Namespace) -> int:
     if not (repo / ".git").exists():
         raise ValueError(f"--repo must be a Git repository: {repo}")
 
-    planner = AIPlanner(args.model) if args.planner == "ai" else HeuristicPlanner()
     adapter = create_adapter(repo, args.workspace, events, args.ecosystem)
     issue = DependencyIssue(
         ecosystem=adapter.ecosystem,
@@ -52,12 +61,31 @@ async def _preview(args: argparse.Namespace) -> int:
         safe_version=args.safe_version,
         advisory_id=args.advisory_id,
     )
-    result = await AutofixEngine(
-        adapter,
-        planner,
-        events,
-        max_attempts=args.max_attempts,
-    ).run(issue)
+    if args.planner == "agent":
+        from depfix.agent_runtime import AgentAutofixRunner
+
+        api_key = None
+        if args.api_key_env:
+            api_key = os.environ.get(args.api_key_env)
+            if not api_key:
+                raise ValueError(f"environment variable is not set: {args.api_key_env}")
+        result = await AgentAutofixRunner(
+            adapter,
+            events,
+            model_name=args.model,
+            max_attempts=args.max_attempts,
+            max_turns=args.max_turns,
+            api_key=api_key,
+            base_url=args.api_base,
+        ).run(issue)
+    else:
+        planner = AIPlanner(args.model) if args.planner == "ai" else HeuristicPlanner()
+        result = await AutofixEngine(
+            adapter,
+            planner,
+            events,
+            max_attempts=args.max_attempts,
+        ).run(issue)
 
     if args.output and result.diff:
         args.output.write_text(result.diff, encoding="utf-8")
@@ -83,7 +111,9 @@ async def _preview(args: argparse.Namespace) -> int:
                 ),
                 file=sys.stderr,
             )
-    return 0 if result.status == "fixed" else 2
+    if result.status == "fixed":
+        return 0
+    return 1 if result.status == "failed" else 2
 
 
 def main() -> None:

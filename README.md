@@ -4,7 +4,7 @@
 
 LLMは「どの直接依存や制約を変更するか」を計画します。manifest編集、パッケージマネージャーの実行、lockfile確認、終了判定は決定論的なコードが担当します。
 
-現在のMVPはnpmとBundlerを自動検出します。デフォルトはAPI不要のヒューリスティックplannerで、npmのローカルpeer dependencyや、Railsのようにコンポーネントを同一バージョンへ固定する構成を処理できます。`--planner ai`を指定するとOpenAI Responses APIの構造化出力をplannerとして使用します。
+現在のMVPはnpmとBundlerを自動検出します。デフォルトはAPI不要のヒューリスティックplannerで、npmのローカルpeer dependencyや、Railsのようにコンポーネントを同一バージョンへ固定する構成を処理できます。`--planner agent`ではOpenAI Agents SDKのtool loopを使い、モデルproviderはLiteLLM経由で選択します。
 
 ## Architecture
 
@@ -16,7 +16,8 @@ PreviewOrchestrator
 │   └── Bundler: Gemfile / Gemfile.lock
 ├── planner
 │   ├── heuristic
-│   └── AI structured planner
+│   ├── Agents SDK + LiteLLM
+│   └── OpenAI structured planner (legacy experiment)
 └── verification gate
     ├── dependency graph resolves
     ├── target version is safe
@@ -40,7 +41,7 @@ PreviewOrchestrator
 6. 安全版、変更ファイル、差分を検証する
 7. 失敗ならresolverの結果をplannerへ戻し、別の候補を試す
 
-「agentic」なのはステップ自体を自由に選ぶことではなく、3と7の閉ループです。clone、コマンド実行、成功判定、終了条件はplannerに委ねません。また、Aikidoの画面に`agentic ... update`と表示されることだけでは、内側でLLMが使われているかは判定できません。この実装ではplannerを交換可能にし、同じworkflowをヒューリスティックでもLLMでも動かせます。
+「agentic」なのはステップ自体を自由に選ぶことではなく、3と7の閉ループです。clone、コマンド実行、成功判定、終了条件はplannerに委ねません。また、Aikidoの画面に`agentic ... update`と表示されることだけでは、内側でLLMが使われているかは判定できません。この実装ではplannerを交換可能にし、同じworkflowをヒューリスティックでもLLMでも動かせます。Agent plannerが呼べる書込み系toolは`try_dependency_fix`だけで、各呼出しは新しい隔離clone上でresolverとverification gateを実行します。
 
 ## npm peer dependency example
 
@@ -79,18 +80,21 @@ attempt 2: rails 7.2.3.2 + activestorage >= 7.2.3.2
            -> activestorage 7.2.3.2をlockし、検証成功
 ```
 
-AI plannerを使う場合:
+## Agent planner and model providers
+
+OpenRouterの無料モデルルーターを使う場合:
 
 ```sh
-export OPENAI_API_KEY=...
+export OPENROUTER_API_KEY=...
 uv run depfix preview \
   --repo ../aikido-peer-dependency-repro \
-  --workspace rails-activestorage \
-  --package activestorage \
-  --safe-version 7.2.3.2 \
-  --planner ai \
-  --model gpt-5.1
+  --package lodash \
+  --safe-version 4.18.1 \
+  --planner agent \
+  --model openrouter/openrouter/free
 ```
+
+モデル名はLiteLLM形式です。例えば`gemini/...`、`groq/...`、`ollama_chat/...`などへ同じagent loopを接続できます。provider標準のAPI key環境変数を利用するか、`--api-key-env MY_PROVIDER_KEY`で明示します。OpenAI Agents SDKはtool実行とturn管理に使用しますが、モデルproviderをOpenAIへ固定しません。
 
 ## Safety model
 
