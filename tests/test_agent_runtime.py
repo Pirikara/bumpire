@@ -3,10 +3,10 @@ from io import StringIO
 import pytest
 
 from bumpire.agent_runtime import (
-    AgentAutofixRunner,
-    AutofixAgentContext,
+    AgentUpdateRunner,
+    UpdateAgentContext,
     build_model,
-    try_dependency_fix,
+    try_dependency_update,
 )
 from bumpire.events import EventLogger
 from bumpire.models import (
@@ -15,15 +15,16 @@ from bumpire.models import (
     FileFixPlan,
     FileReplacement,
     ProjectState,
-    RemediationRequest,
-    TargetResolution,
+    TargetVerification,
+    UpdateRequest,
+    VersionRequirement,
 )
 
 
 class SuccessfulExecutor:
     def execute(
         self,
-        request: RemediationRequest,
+        request: UpdateRequest,
         plan: FileFixPlan,
         *,
         attempt_number: int,
@@ -33,13 +34,13 @@ class SuccessfulExecutor:
             plan=plan,
             success=True,
             phase="completed",
-            target_resolutions=[
-                TargetResolution(
+            target_verifications=[
+                TargetVerification(
                     target=request.targets[0],
                     versions_before=["4.17.20"],
-                    versions_after=[request.targets[0].minimum_version],
+                    versions_after=[request.targets[0].requirement.version],
                     satisfied=True,
-                    outcome="safe",
+                    outcome="satisfied",
                 )
             ],
             changed_files=["package.json", "package-lock.json"],
@@ -58,15 +59,20 @@ def _project() -> ProjectState:
     )
 
 
-def _request() -> RemediationRequest:
-    return RemediationRequest(
+def _request() -> UpdateRequest:
+    return UpdateRequest(
         ecosystem="npm",
-        targets=[DependencyTarget(package="lodash", minimum_version="4.18.1")],
+        targets=[
+            DependencyTarget(
+                package="lodash",
+                requirement=VersionRequirement(version="4.18.1"),
+            )
+        ],
     )
 
 
 def test_tool_schema_accepts_full_manifest_replacements() -> None:
-    schema = try_dependency_fix.params_json_schema
+    schema = try_dependency_update.params_json_schema
 
     assert schema["additionalProperties"] is False
     assert schema["properties"]["files"]["items"]["$ref"] == "#/$defs/FileReplacement"
@@ -75,7 +81,7 @@ def test_tool_schema_accepts_full_manifest_replacements() -> None:
 @pytest.mark.asyncio
 async def test_context_accepts_only_one_verified_fix() -> None:
     request = _request()
-    context = AutofixAgentContext(
+    context = UpdateAgentContext(
         executor=SuccessfulExecutor(),  # type: ignore[arg-type]
         request=request,
         project=_project(),
@@ -102,8 +108,8 @@ async def test_context_accepts_only_one_verified_fix() -> None:
     assert len(context.attempts) == 1
 
 
-class AlreadySafeExecutor:
-    def inspect(self, request: RemediationRequest) -> ProjectState:
+class AlreadySatisfiedExecutor:
+    def inspect(self, request: UpdateRequest) -> ProjectState:
         return ProjectState(
             ecosystem=request.ecosystem,
             package_manager="npm",
@@ -114,23 +120,23 @@ class AlreadySafeExecutor:
 
     def request_is_satisfied(
         self,
-        request: RemediationRequest,
+        request: UpdateRequest,
         versions: dict[str, list[str]],
     ) -> bool:
         return True
 
 
 @pytest.mark.asyncio
-async def test_runner_returns_already_safe_without_agent_turn() -> None:
-    runner = AgentAutofixRunner(
-        AlreadySafeExecutor(),  # type: ignore[arg-type]
+async def test_runner_returns_already_satisfied_without_model_or_agent_turn() -> None:
+    runner = AgentUpdateRunner(
+        AlreadySatisfiedExecutor(),  # type: ignore[arg-type]
         EventLogger(stream=StringIO()),
-        model_name="openrouter/openrouter/free",
+        model_name="",
     )
 
     result = await runner.run(_request())
 
-    assert result.status == "already_safe"
+    assert result.status == "already_satisfied"
     assert result.attempts == []
 
 

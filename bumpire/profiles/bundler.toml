@@ -1,17 +1,19 @@
 name = "bundler"
 ecosystem = "bundler"
+version_scheme = "rubygems"
 detect_all = ["Gemfile", "Gemfile.lock"]
 manifest_globs = ["Gemfile"]
 lockfiles = ["Gemfile.lock"]
 image_template = "ruby:{runtime_version}-slim"
 default_runtime_version = "3.3"
 default_manager_version = ""
-locked_version_pattern = '(?m)^    {package} \((?P<version>[^)]+)\)$'
+locked_version_pattern = '(?m)^    {package} \((?P<version>[0-9][0-9A-Za-z.]*)(?:-[^)]+)?\)$'
 instructions = """
 Edit Gemfile declarations only. Preserve sources, Ruby version, and unrelated gems. For
 an umbrella gem such as Rails, update the direct parent when its exact component pins
-block the safe transitive version. Do not add a direct child pin unless resolver evidence
-shows that it is necessary. Never edit Gemfile.lock directly; Bundler owns it.
+block a requested transitive version. Do not add a direct child pin unless resolver
+evidence shows that it is necessary. Never edit Gemfile.lock directly; Bundler owns it.
+Satisfy every requested version policy as one coherent update.
 """
 resolver_script = '''
 mkdir -p "$HOME" /tmp/gems
@@ -28,6 +30,7 @@ fi
 [manifest_policy]
 kind = "changed-line-patterns"
 allowed_line_patterns = ['^\s*gem(?:\s|\()']
+preserved_declaration_pattern = '''(?m)^\s*gem(?:\s+|\(\s*)["'](?P<name>[^"']+)["']'''
 
 [[runtime_version_sources]]
 path = ".ruby-version"

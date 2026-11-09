@@ -5,19 +5,19 @@ from __future__ import annotations
 from pathlib import Path, PurePosixPath
 from typing import Literal
 
-from packaging.version import InvalidVersion, Version
-
 from bumpire.docker_runtime import ContainerCommand
 from bumpire.events import EventLogger
 from bumpire.models import (
     AttemptResult,
+    DependencyTarget,
     FileFixPlan,
     ProjectState,
-    RemediationRequest,
-    TargetResolution,
+    TargetVerification,
+    UpdateRequest,
 )
 from bumpire.profile import PackageManagerProfile
 from bumpire.sandbox import GitSandbox
+from bumpire.versions import VersionComparisonError, satisfies
 
 _MAX_CONTEXT_BYTES = 1_000_000
 
@@ -41,7 +41,7 @@ class ProfileExecutor:
         self.ecosystem = profile.ecosystem
         self.sandbox_backend = sandbox_backend
 
-    def inspect(self, request: RemediationRequest) -> ProjectState:
+    def inspect(self, request: UpdateRequest) -> ProjectState:
         if request.ecosystem != self.ecosystem:
             raise ValueError(f"profile {self.profile.name} cannot handle {request.ecosystem}")
         workdir = self._workdir(self.repo)
@@ -58,15 +58,11 @@ class ProfileExecutor:
                 raise ValueError("dependency manifest context exceeds 1 MB")
             documents[path.relative_to(workdir).as_posix()] = content
 
-        lockfile_path = workdir / self.profile.lockfiles[0]
-        lock_text = lockfile_path.read_text(encoding="utf-8")
-        target_versions = {
-            target.package: self.profile.locked_versions(lock_text, target.package)
-            for target in request.targets
-        }
+        target_versions = self._locked_versions_by_target(workdir, request)
         missing = sorted(package for package, versions in target_versions.items() if not versions)
         if missing:
             raise ValueError(f"target packages not found in lockfile: {missing}")
+        self._validate_comparable_versions(request, target_versions)
         self.events.emit(
             "detect",
             f"Detected {self.profile.name} through declarative package-manager profile",
@@ -84,7 +80,7 @@ class ProfileExecutor:
 
     def execute(
         self,
-        request: RemediationRequest,
+        request: UpdateRequest,
         plan: FileFixPlan,
         *,
         attempt_number: int,
@@ -160,11 +156,11 @@ class ProfileExecutor:
                 )
 
             after = self._locked_versions_by_target(sandbox.workdir, request)
-            target_resolutions = self.evaluate_targets(request, before, after)
+            target_verifications = self.evaluate_targets(request, before, after)
             failed_targets = [
-                resolution.target.package
-                for resolution in target_resolutions
-                if not resolution.satisfied
+                verification.target.package
+                for verification in target_verifications
+                if not verification.satisfied
             ]
             if failed_targets:
                 return AttemptResult(
@@ -172,10 +168,10 @@ class ProfileExecutor:
                     plan=plan,
                     success=False,
                     phase="verification",
-                    error=f"targets did not reach their minimum versions: {failed_targets}",
+                    error=f"targets did not satisfy their version policies: {failed_targets}",
                     stdout=resolved.stdout,
                     stderr=resolved.stderr,
-                    target_resolutions=target_resolutions,
+                    target_verifications=target_verifications,
                 )
 
             staged = sandbox.stage([*edited_paths, *self.profile.lockfiles])
@@ -187,7 +183,7 @@ class ProfileExecutor:
                     phase="review",
                     error="failed to stage profile-resolved files",
                     stderr=staged.stderr,
-                    target_resolutions=target_resolutions,
+                    target_verifications=target_verifications,
                 )
 
             self.events.emit("review", "Reviewing the profile-driven dependency update")
@@ -202,7 +198,7 @@ class ProfileExecutor:
                     success=False,
                     phase="review",
                     error=f"unexpected files changed: {unexpected}",
-                    target_resolutions=target_resolutions,
+                    target_verifications=target_verifications,
                     changed_files=changed_files,
                 )
 
@@ -214,7 +210,7 @@ class ProfileExecutor:
                     success=False,
                     phase="review",
                     error="resolver produced no staged diff",
-                    target_resolutions=target_resolutions,
+                    target_verifications=target_verifications,
                 )
             self.events.emit("stage", "Adding profile-verified dependency files")
             return AttemptResult(
@@ -224,7 +220,7 @@ class ProfileExecutor:
                 phase="completed",
                 stdout=resolved.stdout,
                 stderr=resolved.stderr,
-                target_resolutions=target_resolutions,
+                target_verifications=target_verifications,
                 changed_files=changed_files,
                 diff=diff,
             )
@@ -248,7 +244,7 @@ class ProfileExecutor:
     def _locked_versions_by_target(
         self,
         workdir: Path,
-        request: RemediationRequest,
+        request: UpdateRequest,
     ) -> dict[str, list[str]]:
         return {
             target.package: self._locked_versions(workdir, target.package)
@@ -257,59 +253,73 @@ class ProfileExecutor:
 
     def request_is_satisfied(
         self,
-        request: RemediationRequest,
+        request: UpdateRequest,
         versions: dict[str, list[str]],
     ) -> bool:
         for target in request.targets:
             current_versions = versions.get(target.package, [])
             if not current_versions or not all(
-                self._at_least(version, target.minimum_version) for version in current_versions
+                self._satisfies(version, target) for version in current_versions
             ):
                 return False
         return True
 
     def evaluate_targets(
         self,
-        request: RemediationRequest,
+        request: UpdateRequest,
         before: dict[str, list[str]],
         after: dict[str, list[str]],
-    ) -> list[TargetResolution]:
-        resolutions: list[TargetResolution] = []
+    ) -> list[TargetVerification]:
+        verifications: list[TargetVerification] = []
         for target in request.targets:
             versions_before = before.get(target.package, [])
             versions_after = after.get(target.package, [])
+            error: str | None = None
             if not versions_before:
                 satisfied = False
-                outcome: Literal["safe", "removed", "below_minimum", "missing"] = "missing"
+                outcome = "missing"
             elif not versions_after:
-                satisfied = True
-                outcome = "removed"
-            elif all(self._at_least(version, target.minimum_version) for version in versions_after):
-                satisfied = True
-                outcome = "safe"
+                satisfied = target.allow_removal
+                outcome = "removed" if satisfied else "removal_disallowed"
             else:
-                satisfied = False
-                outcome = "below_minimum"
-            resolutions.append(
-                TargetResolution(
+                try:
+                    satisfied = all(self._satisfies(version, target) for version in versions_after)
+                    outcome = "satisfied" if satisfied else "constraint_mismatch"
+                except VersionComparisonError as exc:
+                    satisfied = False
+                    outcome = "invalid_version"
+                    error = str(exc)
+            verifications.append(
+                TargetVerification(
                     target=target,
                     versions_before=versions_before,
                     versions_after=versions_after,
                     satisfied=satisfied,
                     outcome=outcome,
+                    error=error,
                 )
             )
-        return resolutions
+        return verifications
 
     def _repo_path(self, path: str) -> str:
         return str(PurePosixPath(self.workspace) / PurePosixPath(path))
 
-    @staticmethod
-    def _at_least(actual: str, minimum: str) -> bool:
+    def _satisfies(self, actual: str, target: DependencyTarget) -> bool:
+        return satisfies(actual, target.requirement, self.profile.version_scheme)
+
+    def _validate_comparable_versions(
+        self,
+        request: UpdateRequest,
+        versions: dict[str, list[str]],
+    ) -> None:
         try:
-            return Version(actual) >= Version(minimum)
-        except InvalidVersion:
-            return actual == minimum
+            for target in request.targets:
+                for version in versions[target.package]:
+                    self._satisfies(version, target)
+        except VersionComparisonError as exc:
+            raise ValueError(
+                f"profile {self.profile.name} cannot evaluate the requested version policy: {exc}"
+            ) from exc
 
     @staticmethod
     def _preserve_final_newline(original: str, replacement: str) -> str:

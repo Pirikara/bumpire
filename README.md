@@ -21,16 +21,20 @@ just changing one version string. An LLM proposes coordinated manifest edits, wh
 fixed workflow resolves the lockfile in Docker and accepts the result only when every
 deterministic gate passes.
 
+Bumpire deliberately does not decide why an update should happen or which version should
+be requested. A human, scheduler, dependency service, or security scanner supplies the
+update policy; Bumpire owns the constrained planning, resolution, and verification.
+
 It handles cases such as:
 
-- a vulnerable npm package blocked by a local package's exact `peerDependencies`;
-- a vulnerable Rails component pinned to the exact version of the parent `rails` gem;
+- an npm update blocked by a local package's exact `peerDependencies`;
+- a Rails component pinned to the exact version of the parent `rails` gem;
 - an initial proposal rejected by the package manager, requiring another agent turn.
 
 > [!IMPORTANT]
 > Bumpire is an early-stage experiment. It currently generates a verified patch; branch
-> creation, GitHub pull requests, private registry authentication, and post-update
-> vulnerability scanning are not implemented yet.
+> creation, GitHub pull requests, and private registry authentication are not implemented
+> yet.
 
 ## Why Bumpire?
 
@@ -40,7 +44,7 @@ constraint graph.
 
 | | Traditional updater | Bumpire |
 |---|---|---|
-| Chooses a target version | Yes | Yes |
+| Discovers what should be updated | Yes | **No — caller-supplied** |
 | Coordinates related manifest constraints | Rule-dependent | Agent-planned |
 | Learns from resolver errors | Limited | Feeds evidence into the next turn |
 | Executes arbitrary agent commands | N/A | **No** |
@@ -53,7 +57,7 @@ The model decides what to try. Bumpire decides what is allowed and whether it wo
 
 ```mermaid
 flowchart LR
-    A[Security advisory] --> B[Detect package-manager profile]
+    A[Explicit update request] --> B[Detect package-manager profile]
     B --> C[Show the agent allowed manifests]
     C --> D[Agent proposes complete manifest replacements]
     D --> E[Fresh shallow clone]
@@ -93,8 +97,7 @@ export OPENROUTER_API_KEY="..."
 
 uv run bumpire preview \
   --repo ../your-project \
-  --package lodash \
-  --safe-version 4.18.1 \
+  --target lodash 4.18.1 \
   --model openrouter/openrouter/free \
   --output bumpire.patch
 ```
@@ -102,9 +105,9 @@ uv run bumpire preview \
 Bumpire never modifies the supplied working tree. Every attempt runs in a temporary
 clone, and only the staged diff from a successful attempt is returned.
 
-To remediate multiple packages as one coherent update, repeat `--target`. The batch is
-atomic: Bumpire returns a patch only when every target reaches its minimum version (or
-is removed from the resolved dependency graph).
+To update multiple packages as one coherent operation, repeat `--target`. The batch is
+atomic: Bumpire returns a patch only when every locked occurrence satisfies its declared
+policy.
 
 ```bash
 uv run bumpire preview \
@@ -115,7 +118,21 @@ uv run bumpire preview \
   --output bumpire.patch
 ```
 
-`--package` with `--safe-version` remains available as a single-target shorthand.
+### Version policies
+
+A bare version or `==` is an exact identity requirement. Use `>=` only when accepting any
+later version is intentional:
+
+```bash
+--target rails 7.2.3.2
+--target activestorage '>=7.2.3.2'
+```
+
+Exact comparison uses the version text recorded in the lockfile. Ordered comparison uses
+SemVer for npm and RubyGems version ordering for Bundler. Target removal is rejected by
+default; opt in for a specific package with `--allow-removal PACKAGE`.
+
+The legacy `--package` with `--safe-version` form maps to an `at_least` policy.
 
 Use `--workspace path/to/app` for a package nested inside a monorepo. If multiple
 profiles match the same workspace, select one explicitly with `--ecosystem npm` or
@@ -126,7 +143,8 @@ profiles match the same workspace, select one explicitly with `--ecosystem npm` 
 | Bumpire's acceptance gate | Your repository's CI |
 |---|---|
 | Dependency graph resolves | Unit and integration tests |
-| Every occurrence of every target reaches its minimum version, or is removed | Build, lint, and type checking |
+| Every occurrence of every target satisfies its explicit version policy | Build, lint, and type checking |
+| Target removal was explicitly permitted | Application dependency requirements |
 | Only profile-allowlisted files changed | Application behavior |
 | Agent did not edit the lockfile directly | API and runtime compatibility |
 | A non-empty staged diff exists | Deployment readiness |
@@ -156,6 +174,7 @@ A profile defines:
 - runtime-version discovery and the Docker image;
 - the trusted resolver procedure;
 - resolved-version extraction;
+- the package-manager version-ordering scheme;
 - package-manager guidance for the agent.
 
 Adding an ecosystem should normally mean adding one file under
@@ -184,9 +203,9 @@ rejects any unrelated file change.
 
 ### Rails / Active Storage
 
-When `activestorage` is vulnerable but the application depends on the umbrella Rails gem,
-the component cannot be bumped independently because Rails pins every component to its
-exact version. Bumpire updates the direct parent instead:
+When an application requests an `activestorage` update but depends on the umbrella Rails
+gem, the component cannot be bumped independently because Rails pins every component to
+its exact version. Bumpire updates the direct parent instead:
 
 ```diff
 -gem "rails", "7.2.3.1"

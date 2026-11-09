@@ -21,6 +21,7 @@ class ManifestPolicy(BaseModel):
     kind: Literal["json-sections", "changed-line-patterns"]
     allowed_sections: list[str] = Field(default_factory=list)
     allowed_line_patterns: list[str] = Field(default_factory=list)
+    preserved_declaration_pattern: str | None = None
 
     @model_validator(mode="after")
     def required_rules(self) -> ManifestPolicy:
@@ -30,12 +31,17 @@ class ManifestPolicy(BaseModel):
             raise ValueError("changed-line-patterns policy requires allowed_line_patterns")
         for pattern in self.allowed_line_patterns:
             re.compile(pattern)
+        if self.preserved_declaration_pattern is not None:
+            compiled = re.compile(self.preserved_declaration_pattern)
+            if "name" not in compiled.groupindex:
+                raise ValueError("preserved_declaration_pattern requires a named 'name' group")
         return self
 
 
 class PackageManagerProfile(BaseModel):
     name: str
     ecosystem: str
+    version_scheme: Literal["semver", "rubygems"]
     detect_all: list[str] = Field(min_length=1)
     manifest_globs: list[str] = Field(min_length=1)
     lockfiles: list[str] = Field(min_length=1)
@@ -131,6 +137,17 @@ class PackageManagerProfile(BaseModel):
             raise ValueError(
                 f"manifest replacement changes lines outside the profile policy: {disallowed[:3]}"
             )
+        self._validate_preserved_declarations(original, replacement)
+
+    def _validate_preserved_declarations(self, original: str, replacement: str) -> None:
+        pattern = self.manifest_policy.preserved_declaration_pattern
+        if pattern is None:
+            return
+        before = {match.group("name") for match in re.finditer(pattern, original, re.MULTILINE)}
+        after = {match.group("name") for match in re.finditer(pattern, replacement, re.MULTILINE)}
+        removed = sorted(before - after)
+        if removed:
+            raise ValueError(f"dependency declarations may not be removed: {removed}")
 
     def _validate_json_sections(self, original: str, replacement: str) -> None:
         try:

@@ -1,4 +1,4 @@
-"""Small event stream mirroring the stages exposed by production AutoFix systems."""
+"""Small event stream for observable dependency-update stages."""
 
 from __future__ import annotations
 

@@ -233,11 +233,10 @@ wheels = [
 
 [[package]]
 name = "bumpire"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "." }
 dependencies = [
     { name = "openai-agents", extra = ["litellm"] },
-    { name = "packaging" },
     { name = "pydantic" },
 ]
 
@@ -251,7 +250,6 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "openai-agents", extras = ["litellm"], specifier = ">=0.19.0,<0.20" },
-    { name = "packaging", specifier = ">=24.0" },
     { name = "pydantic", specifier = ">=2.11.0,<3" },
 ]
 

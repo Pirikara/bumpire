@@ -9,10 +9,10 @@ import os
 import sys
 from pathlib import Path
 
-from bumpire.agent_runtime import AgentAutofixRunner
+from bumpire.agent_runtime import AgentUpdateRunner
 from bumpire.docker_runtime import DockerRuntime
 from bumpire.events import EventLogger
-from bumpire.models import DependencyTarget, RemediationRequest
+from bumpire.models import DependencyTarget, UpdateRequest, VersionRequirement
 from bumpire.profile import detect_profile
 from bumpire.profile_executor import ProfileExecutor
 
@@ -20,7 +20,7 @@ from bumpire.profile_executor import ProfileExecutor
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="bumpire")
     subcommands = parser.add_subparsers(dest="command", required=True)
-    preview = subcommands.add_parser("preview", help="generate a verified dependency-fix diff")
+    preview = subcommands.add_parser("preview", help="generate a verified dependency-update diff")
     preview.add_argument("--repo", type=Path, required=True)
     preview.add_argument("--workspace", default=".")
     preview.add_argument(
@@ -32,16 +32,18 @@ def _parser() -> argparse.ArgumentParser:
         "--target",
         action="append",
         nargs=2,
-        metavar=("PACKAGE", "MINIMUM_VERSION"),
-        help="add a package and minimum safe version to the atomic remediation batch",
+        metavar=("PACKAGE", "REQUIREMENT"),
+        help="add an exact version or an explicit >= version policy to the atomic update",
+    )
+    preview.add_argument(
+        "--allow-removal",
+        action="append",
+        default=[],
+        metavar="PACKAGE",
+        help="allow a requested package to disappear from the resolved dependency graph",
     )
     preview.add_argument("--package", help="single-target compatibility option")
     preview.add_argument("--safe-version", help="single-target compatibility option")
-    preview.add_argument(
-        "--advisory-id",
-        action="append",
-        help="advisory ID for the package supplied through the compatibility options",
-    )
     preview.add_argument("--model", default=os.environ.get("BUMPIRE_MODEL", ""))
     preview.add_argument("--api-base", default=os.environ.get("BUMPIRE_API_BASE"))
     preview.add_argument(
@@ -65,7 +67,7 @@ async def _preview(args: argparse.Namespace) -> int:
     DockerRuntime.ensure_available()
     executor = ProfileExecutor(repo, args.workspace, events, profile)
     request = _request(args, profile.ecosystem)
-    result = await AgentAutofixRunner(
+    result = await AgentUpdateRunner(
         executor,
         events,
         model_name=args.model,
@@ -80,15 +82,15 @@ async def _preview(args: argparse.Namespace) -> int:
 
     if args.json:
         print(result.model_dump_json(indent=2))
-    elif result.status == "fixed":
+    elif result.status == "updated":
         print(result.diff)
         if args.output:
             print(f"\nPreview written to {args.output}", file=sys.stderr)
-    elif result.status == "already_safe":
+    elif result.status == "already_satisfied":
         packages = ", ".join(target.package for target in result.request.targets)
-        print(f"All requested targets are already safe: {packages}")
+        print(f"All requested targets already satisfy their policies: {packages}")
     else:
-        print(f"AutoFix {result.status}: {result.error}", file=sys.stderr)
+        print(f"Update {result.status}: {result.error}", file=sys.stderr)
         for attempt in result.attempts:
             print(
                 json.dumps(
@@ -97,49 +99,75 @@ async def _preview(args: argparse.Namespace) -> int:
                         "phase": attempt.phase,
                         "error": attempt.error,
                         "stderr": attempt.stderr,
-                        "target_resolutions": [
-                            resolution.model_dump(mode="json")
-                            for resolution in attempt.target_resolutions
+                        "target_verifications": [
+                            verification.model_dump(mode="json")
+                            for verification in attempt.target_verifications
                         ],
                     },
                     ensure_ascii=False,
                 ),
                 file=sys.stderr,
             )
-    if result.status in {"fixed", "already_safe"}:
+    if result.status in {"updated", "already_satisfied"}:
         return 0
     return 1 if result.status == "failed" else 2
 
 
-def _request(args: argparse.Namespace, ecosystem: str) -> RemediationRequest:
+def _request(args: argparse.Namespace, ecosystem: str) -> UpdateRequest:
     batch_targets = args.target or []
-    uses_compatibility_options = bool(args.package or args.safe_version or args.advisory_id)
+    uses_compatibility_options = bool(args.package or args.safe_version)
     if batch_targets and uses_compatibility_options:
-        raise ValueError(
-            "--target cannot be combined with --package, --safe-version, or --advisory-id"
-        )
+        raise ValueError("--target cannot be combined with --package or --safe-version")
     if batch_targets:
-        return RemediationRequest(
+        targets = [
+            DependencyTarget(
+                package=package,
+                requirement=_requirement(requirement),
+                allow_removal=package in args.allow_removal,
+            )
+            for package, requirement in batch_targets
+        ]
+        _validate_removal_packages(args.allow_removal, targets)
+        return UpdateRequest(
             ecosystem=ecosystem,
-            targets=[
-                DependencyTarget(package=package, minimum_version=minimum_version)
-                for package, minimum_version in batch_targets
-            ],
+            targets=targets,
         )
     if bool(args.package) != bool(args.safe_version):
         raise ValueError("--package and --safe-version must be supplied together")
     if not args.package:
         raise ValueError("supply at least one --target, or --package with --safe-version")
-    return RemediationRequest(
+    targets = [
+        DependencyTarget(
+            package=args.package,
+            requirement=VersionRequirement(kind="at_least", version=args.safe_version),
+            allow_removal=args.package in args.allow_removal,
+        )
+    ]
+    _validate_removal_packages(args.allow_removal, targets)
+    return UpdateRequest(
         ecosystem=ecosystem,
-        targets=[
-            DependencyTarget(
-                package=args.package,
-                minimum_version=args.safe_version,
-                advisory_ids=args.advisory_id or [],
-            )
-        ],
+        targets=targets,
     )
+
+
+def _requirement(value: str) -> VersionRequirement:
+    value = value.strip()
+    if value.startswith("=="):
+        return VersionRequirement(kind="exact", version=value[2:])
+    if value.startswith(">="):
+        return VersionRequirement(kind="at_least", version=value[2:])
+    if value.startswith(("=", ">", "<", "!", "~", "^")):
+        raise ValueError("version requirements support only exact versions, ==, or >=")
+    return VersionRequirement(kind="exact", version=value)
+
+
+def _validate_removal_packages(
+    packages: list[str],
+    targets: list[DependencyTarget],
+) -> None:
+    unknown = sorted(set(packages) - {target.package for target in targets})
+    if unknown:
+        raise ValueError(f"--allow-removal names packages that are not targets: {unknown}")
 
 
 def _api_key(args: argparse.Namespace) -> str | None:

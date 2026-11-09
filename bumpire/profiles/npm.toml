@@ -1,5 +1,6 @@
 name = "npm"
 ecosystem = "npm"
+version_scheme = "semver"
 detect_all = ["package.json", "package-lock.json"]
 manifest_globs = ["package.json", "**/package.json"]
 lockfiles = ["package-lock.json"]
@@ -11,7 +12,7 @@ instructions = """
 Edit package.json dependency fields only. Preserve unrelated metadata and formatting as
 closely as possible. For a local package peer conflict, update the root dependency and
 the local package's peerDependencies together. Never edit package-lock.json directly;
-the resolver owns it.
+the resolver owns it. Satisfy every requested version policy as one coherent update.
 """
 resolver_script = '''
 mkdir -p "$HOME" /tmp/npm-cache
