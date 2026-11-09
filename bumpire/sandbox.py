@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import tempfile
 from pathlib import Path, PurePosixPath
 from types import TracebackType
@@ -12,6 +13,7 @@ from bumpire.events import EventLogger
 from bumpire.process import CommandResult, run_command
 
 _GIT = ["git", "-c", "core.hooksPath=/dev/null"]
+_GIT_OBJECT_ID = re.compile(r"^[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?$")
 
 
 class GitSandbox:
@@ -22,6 +24,7 @@ class GitSandbox:
         events: EventLogger,
         *,
         backend: Literal["local", "docker"] = "local",
+        base_commit: str | None = None,
     ) -> None:
         self.source = source.resolve()
         self.workspace_rel = PurePosixPath(workspace or ".")
@@ -31,6 +34,9 @@ class GitSandbox:
             raise ValueError(f"unsupported sandbox backend: {backend}")
         self.events = events
         self.backend = backend
+        if base_commit is not None and _GIT_OBJECT_ID.fullmatch(base_commit) is None:
+            raise ValueError("base_commit must be a full hexadecimal Git object ID")
+        self.base_commit = base_commit.lower() if base_commit is not None else None
         self._temporary: tempfile.TemporaryDirectory[str] | None = None
         self.clone_root: Path | None = None
         self.workdir: Path | None = None
@@ -51,6 +57,9 @@ class GitSandbox:
             self._temporary.cleanup()
             raise RuntimeError(f"git clone failed: {result.stderr or result.stdout}")
 
+        if self.base_commit is not None:
+            self._checkout_base_commit(destination)
+
         self.clone_root = destination
         self.workdir = (destination / Path(*self.workspace_rel.parts)).resolve()
         if not self.workdir.is_relative_to(destination.resolve()) or not self.workdir.is_dir():
@@ -68,6 +77,33 @@ class GitSandbox:
                 raise RuntimeError(f"git config failed: {configured.stderr}")
         self.events.emit("git", "Configured isolated Git identity and disabled hooks")
         return self
+
+    def _checkout_base_commit(self, destination: Path) -> None:
+        assert self.base_commit is not None
+        exists = run_command(
+            [*_GIT, "cat-file", "-e", f"{self.base_commit}^{{commit}}"],
+            cwd=destination,
+        )
+        if not exists.ok:
+            fetched = run_command(
+                [*_GIT, "fetch", "--depth", "1", "origin", self.base_commit],
+                cwd=destination,
+            )
+            if not fetched.ok:
+                self._temporary.cleanup()
+                raise RuntimeError(f"could not fetch pinned base commit: {fetched.stderr}")
+        checked_out = run_command(
+            [*_GIT, "checkout", "--detach", self.base_commit],
+            cwd=destination,
+        )
+        if not checked_out.ok:
+            self._temporary.cleanup()
+            raise RuntimeError(f"could not check out pinned base commit: {checked_out.stderr}")
+        actual = run_command([*_GIT, "rev-parse", "HEAD"], cwd=destination)
+        if not actual.ok or actual.stdout.strip().lower() != self.base_commit:
+            self._temporary.cleanup()
+            raise RuntimeError("isolated workspace does not match the pinned base commit")
+        self.events.emit("git", f"Pinned isolated workspace to {self.base_commit[:12]}")
 
     def __exit__(
         self,

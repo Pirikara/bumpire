@@ -15,6 +15,7 @@ from bumpire.models import (
     TargetVerification,
     UpdateRequest,
 )
+from bumpire.process import run_command
 from bumpire.profile import PackageManagerProfile
 from bumpire.sandbox import GitSandbox
 from bumpire.versions import VersionComparisonError, satisfies
@@ -44,6 +45,7 @@ class ProfileExecutor:
     def inspect(self, request: UpdateRequest) -> ProjectState:
         if request.ecosystem != self.ecosystem:
             raise ValueError(f"profile {self.profile.name} cannot handle {request.ecosystem}")
+        base_commit, base_ref = self._repository_state()
         workdir = self._workdir(self.repo)
         manifests = self.profile.manifest_paths(workdir)
         if not manifests:
@@ -63,6 +65,9 @@ class ProfileExecutor:
         if missing:
             raise ValueError(f"target packages not found in lockfile: {missing}")
         self._validate_comparable_versions(request, target_versions)
+        confirmed_commit, confirmed_ref = self._repository_state()
+        if (confirmed_commit, confirmed_ref) != (base_commit, base_ref):
+            raise ValueError("repository HEAD changed while dependency state was being inspected")
         self.events.emit(
             "detect",
             f"Detected {self.profile.name} through declarative package-manager profile",
@@ -70,6 +75,9 @@ class ProfileExecutor:
         self.events.emit("manifest", f"Loaded {len(documents)} allowed dependency manifests")
         self.events.emit("lockfile", f"Checking {self.profile.name} lockfile versions")
         return ProjectState(
+            base_commit=base_commit,
+            base_ref=base_ref,
+            workspace=self.workspace,
             ecosystem=self.ecosystem,
             package_manager=self.profile.name,
             lockfile_path=self.profile.lockfiles[0],
@@ -84,12 +92,14 @@ class ProfileExecutor:
         plan: FileFixPlan,
         *,
         attempt_number: int,
+        base_commit: str,
     ) -> AttemptResult:
         with GitSandbox(
             self.repo,
             self.workspace,
             self.events,
             backend=self.sandbox_backend,
+            base_commit=base_commit,
         ) as sandbox:
             assert sandbox.workdir is not None
             before = self._locked_versions_by_target(sandbox.workdir, request)
@@ -230,6 +240,25 @@ class ProfileExecutor:
         if not workdir.is_relative_to(root.resolve()) or not workdir.is_dir():
             raise ValueError(f"workspace does not exist: {self.workspace}")
         return workdir
+
+    def _repository_state(self) -> tuple[str, str | None]:
+        status = run_command(
+            ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+            cwd=self.repo,
+        )
+        if not status.ok:
+            raise ValueError(f"could not inspect repository state: {status.stderr}")
+        if status.stdout.strip():
+            raise ValueError("repository must have a clean working tree before inspection")
+        commit = run_command(["git", "rev-parse", "--verify", "HEAD"], cwd=self.repo)
+        if not commit.ok:
+            raise ValueError(f"could not resolve repository HEAD: {commit.stderr}")
+        branch = run_command(
+            ["git", "symbolic-ref", "--quiet", "--short", "HEAD"],
+            cwd=self.repo,
+        )
+        base_ref = branch.stdout.strip() if branch.ok else None
+        return commit.stdout.strip(), base_ref
 
     def _locked_versions(self, workdir: Path, package: str) -> list[str]:
         versions: list[str] = []

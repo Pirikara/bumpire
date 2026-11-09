@@ -25,6 +25,7 @@ from bumpire.models import (
     ProjectState,
     UpdateRequest,
     UpdateResult,
+    VerifiedUpdateArtifact,
 )
 from bumpire.profile_executor import ProfileExecutor
 
@@ -104,6 +105,7 @@ class UpdateAgentContext:
             self.request,
             plan,
             attempt_number=number,
+            base_commit=self.project.base_commit,
         )
         self.attempts.append(attempt)
         if attempt.success:
@@ -221,6 +223,11 @@ class AgentUpdateRunner:
 
         successful = context.successful_attempt
         if successful is not None:
+            artifact = VerifiedUpdateArtifact.from_attempt(
+                project=project,
+                request=request,
+                attempt=successful,
+            )
             summary = ", ".join(
                 f"{verification.target.package} "
                 f"{self._display_versions(verification.versions_before)} → "
@@ -237,6 +244,7 @@ class AgentUpdateRunner:
                 attempts=context.attempts,
                 diff=successful.diff,
                 changed_files=successful.changed_files,
+                artifact=artifact,
             )
         if runner_error is not None:
             status = "exhausted" if context.attempts else "failed"
@@ -289,6 +297,9 @@ compatibility because application tests run later in the destination repository'
                     "ecosystem": project.ecosystem,
                     "package_manager_profile": project.package_manager,
                     "lockfile_path": project.lockfile_path,
+                    "base_commit": project.base_commit,
+                    "base_ref": project.base_ref,
+                    "workspace": project.workspace,
                     "target_locked_versions": project.target_locked_versions,
                     "allowed_manifest_documents": project.manifest_documents,
                 },

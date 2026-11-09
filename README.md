@@ -32,9 +32,9 @@ It handles cases such as:
 - an initial proposal rejected by the package manager, requiring another agent turn.
 
 > [!IMPORTANT]
-> Bumpire is an early-stage experiment. It currently generates a verified patch; branch
-> creation, GitHub pull requests, and private registry authentication are not implemented
-> yet.
+> Bumpire is an early-stage experiment. It currently generates a verified patch and a
+> machine-readable update artifact; branch creation, GitHub pull requests, and private
+> registry authentication are not implemented yet.
 
 ## Why Bumpire?
 
@@ -66,7 +66,7 @@ flowchart LR
     G -- resolver error --> H[Return evidence to the agent]
     H --> D
     G -- rejected --> X[Discard attempt]
-    G -- passed --> I[Reviewable Git patch]
+    G -- passed --> I[Verified artifact and Git patch]
 ```
 
 Most of this is intentionally a workflow. The agentic part is the closed loop between
@@ -99,11 +99,16 @@ uv run bumpire preview \
   --repo ../your-project \
   --target lodash 4.18.1 \
   --model openrouter/openrouter/free \
-  --output bumpire.patch
+  --output bumpire.patch \
+  --artifact-output bumpire-artifact.json
 ```
 
 Bumpire never modifies the supplied working tree. Every attempt runs in a temporary
 clone, and only the staged diff from a successful attempt is returned.
+
+The supplied repository must be clean. Inspection records its full HEAD object ID, and
+every resolver attempt checks out that exact commit even if the source branch moves while
+the agent is running.
 
 To update multiple packages as one coherent operation, repeat `--target`. The batch is
 atomic: Bumpire returns a patch only when every locked occurrence satisfies its declared
@@ -155,6 +160,21 @@ repository's CI for that judgment.
 
 All targets in one request must belong to the same package-manager profile and workspace.
 Cross-ecosystem or cross-workspace campaigns should be split into separate patches.
+
+## Verified update artifact
+
+Successful updates can be exported as JSON with `--artifact-output`. The artifact binds:
+
+- the full base commit and branch name;
+- the workspace, ecosystem, and package-manager profile;
+- the complete caller-supplied update request;
+- deterministic evidence for every requested target;
+- a sorted changed-file list;
+- the staged patch and its SHA-256 digest.
+
+The schema rejects altered patch content, incomplete target evidence, failed target
+verification, and inconsistent request metadata. This artifact is the handoff boundary
+for a future GitHub publisher; it is not an agent-authored success claim.
 
 ## Built-in profiles
 
@@ -217,6 +237,7 @@ Bundler then resolves `activestorage` and the other Rails components to `7.2.3.2
 ## Security boundaries
 
 - Each candidate runs in a fresh shallow clone with Git hooks disabled.
+- Every candidate is pinned to the commit inspected before planning began.
 - The resolver runs as the host UID/GID in a read-only-root Docker container.
 - Linux capabilities are dropped and `no-new-privileges` is enabled.
 - CPU, memory, process, and temporary-storage limits are applied.

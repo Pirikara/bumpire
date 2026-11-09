@@ -53,6 +53,11 @@ def _parser() -> argparse.ArgumentParser:
     preview.add_argument("--max-attempts", type=int, default=5)
     preview.add_argument("--max-turns", type=int, default=12)
     preview.add_argument("--output", type=Path)
+    preview.add_argument(
+        "--artifact-output",
+        type=Path,
+        help="write the verified update artifact as JSON",
+    )
     preview.add_argument("--json", action="store_true")
     return parser
 
@@ -79,6 +84,10 @@ async def _preview(args: argparse.Namespace) -> int:
 
     if args.output and result.diff:
         args.output.write_text(result.diff, encoding="utf-8")
+    if args.artifact_output:
+        if result.artifact is None:
+            raise ValueError("no verified update artifact was produced")
+        args.artifact_output.write_text(result.artifact.model_dump_json(indent=2), encoding="utf-8")
 
     if args.json:
         print(result.model_dump_json(indent=2))
@@ -86,6 +95,8 @@ async def _preview(args: argparse.Namespace) -> int:
         print(result.diff)
         if args.output:
             print(f"\nPreview written to {args.output}", file=sys.stderr)
+        if args.artifact_output:
+            print(f"Artifact written to {args.artifact_output}", file=sys.stderr)
     elif result.status == "already_satisfied":
         packages = ", ".join(target.package for target in result.request.targets)
         print(f"All requested targets already satisfy their policies: {packages}")
