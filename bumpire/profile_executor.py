@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from pathlib import Path, PurePosixPath
 from typing import Literal
 
@@ -10,11 +9,16 @@ from packaging.version import InvalidVersion, Version
 
 from bumpire.docker_runtime import ContainerCommand
 from bumpire.events import EventLogger
-from bumpire.models import AttemptResult, DependencyIssue, FileFixPlan, ProjectState
+from bumpire.models import (
+    AttemptResult,
+    FileFixPlan,
+    ProjectState,
+    RemediationRequest,
+    TargetResolution,
+)
 from bumpire.profile import PackageManagerProfile
 from bumpire.sandbox import GitSandbox
 
-_VERSION_MARKER = re.compile(r"^BUMPIRE_RESOLVED_VERSION=(?P<version>.+)$", re.MULTILINE)
 _MAX_CONTEXT_BYTES = 1_000_000
 
 
@@ -37,9 +41,9 @@ class ProfileExecutor:
         self.ecosystem = profile.ecosystem
         self.sandbox_backend = sandbox_backend
 
-    def inspect(self, issue: DependencyIssue) -> ProjectState:
-        if issue.ecosystem != self.ecosystem:
-            raise ValueError(f"profile {self.profile.name} cannot handle {issue.ecosystem}")
+    def inspect(self, request: RemediationRequest) -> ProjectState:
+        if request.ecosystem != self.ecosystem:
+            raise ValueError(f"profile {self.profile.name} cannot handle {request.ecosystem}")
         workdir = self._workdir(self.repo)
         manifests = self.profile.manifest_paths(workdir)
         if not manifests:
@@ -56,24 +60,31 @@ class ProfileExecutor:
 
         lockfile_path = workdir / self.profile.lockfiles[0]
         lock_text = lockfile_path.read_text(encoding="utf-8")
+        target_versions = {
+            target.package: self.profile.locked_versions(lock_text, target.package)
+            for target in request.targets
+        }
+        missing = sorted(package for package, versions in target_versions.items() if not versions)
+        if missing:
+            raise ValueError(f"target packages not found in lockfile: {missing}")
         self.events.emit(
             "detect",
             f"Detected {self.profile.name} through declarative package-manager profile",
         )
         self.events.emit("manifest", f"Loaded {len(documents)} allowed dependency manifests")
-        self.events.emit("lockfile", f"Checking {self.profile.name} lockfile version")
+        self.events.emit("lockfile", f"Checking {self.profile.name} lockfile versions")
         return ProjectState(
             ecosystem=self.ecosystem,
             package_manager=self.profile.name,
             lockfile_path=self.profile.lockfiles[0],
-            target_locked_version=self.profile.locked_version(lock_text, issue.package),
+            target_locked_versions=target_versions,
             manifest_documents=documents,
             profile_instructions=self.profile.instructions,
         )
 
     def execute(
         self,
-        issue: DependencyIssue,
+        request: RemediationRequest,
         plan: FileFixPlan,
         *,
         attempt_number: int,
@@ -85,7 +96,7 @@ class ProfileExecutor:
             backend=self.sandbox_backend,
         ) as sandbox:
             assert sandbox.workdir is not None
-            before = self._locked_version(sandbox.workdir, issue.package)
+            before = self._locked_versions_by_target(sandbox.workdir, request)
             edited_paths: list[str] = []
             try:
                 for replacement in plan.files:
@@ -107,7 +118,6 @@ class ProfileExecutor:
                     success=False,
                     phase="manifest",
                     error=str(exc),
-                    target_before=before,
                 )
 
             self.events.emit(
@@ -124,7 +134,6 @@ class ProfileExecutor:
                     phase="manifest",
                     error="failed to stage dependency manifests",
                     stderr=staged_manifest.stderr,
-                    target_before=before,
                 )
 
             self.events.emit("resolve", f"Running {self.profile.name} profile resolver")
@@ -134,8 +143,6 @@ class ProfileExecutor:
                     image=self.profile.image(sandbox.workdir),
                     args=("sh", "-ceu", self.profile.resolver_script, "bumpire-profile"),
                     environment={
-                        "BUMPIRE_PACKAGE": issue.package,
-                        "BUMPIRE_SAFE_VERSION": issue.safe_version,
                         "BUMPIRE_MANAGER_VERSION": self.profile.manager_version(sandbox.workdir),
                     },
                 ),
@@ -150,25 +157,25 @@ class ProfileExecutor:
                     error=f"{self.profile.name} could not resolve the proposed dependency graph",
                     stdout=resolved.stdout,
                     stderr=resolved.stderr,
-                    target_before=before,
                 )
 
-            marker = _VERSION_MARKER.search(resolved.stdout)
-            target_after = marker.group("version").strip() if marker is not None else None
-            if target_after is None or not self._at_least(target_after, issue.safe_version):
+            after = self._locked_versions_by_target(sandbox.workdir, request)
+            target_resolutions = self.evaluate_targets(request, before, after)
+            failed_targets = [
+                resolution.target.package
+                for resolution in target_resolutions
+                if not resolution.satisfied
+            ]
+            if failed_targets:
                 return AttemptResult(
                     number=attempt_number,
                     plan=plan,
                     success=False,
                     phase="verification",
-                    error=(
-                        f"profile reported {issue.package}={target_after!r}, "
-                        f"expected >= {issue.safe_version}"
-                    ),
+                    error=f"targets did not reach their minimum versions: {failed_targets}",
                     stdout=resolved.stdout,
                     stderr=resolved.stderr,
-                    target_before=before,
-                    target_after=target_after,
+                    target_resolutions=target_resolutions,
                 )
 
             staged = sandbox.stage([*edited_paths, *self.profile.lockfiles])
@@ -180,8 +187,7 @@ class ProfileExecutor:
                     phase="review",
                     error="failed to stage profile-resolved files",
                     stderr=staged.stderr,
-                    target_before=before,
-                    target_after=target_after,
+                    target_resolutions=target_resolutions,
                 )
 
             self.events.emit("review", "Reviewing the profile-driven dependency update")
@@ -196,8 +202,7 @@ class ProfileExecutor:
                     success=False,
                     phase="review",
                     error=f"unexpected files changed: {unexpected}",
-                    target_before=before,
-                    target_after=target_after,
+                    target_resolutions=target_resolutions,
                     changed_files=changed_files,
                 )
 
@@ -209,8 +214,7 @@ class ProfileExecutor:
                     success=False,
                     phase="review",
                     error="resolver produced no staged diff",
-                    target_before=before,
-                    target_after=target_after,
+                    target_resolutions=target_resolutions,
                 )
             self.events.emit("stage", "Adding profile-verified dependency files")
             return AttemptResult(
@@ -220,8 +224,7 @@ class ProfileExecutor:
                 phase="completed",
                 stdout=resolved.stdout,
                 stderr=resolved.stderr,
-                target_before=before,
-                target_after=target_after,
+                target_resolutions=target_resolutions,
                 changed_files=changed_files,
                 diff=diff,
             )
@@ -232,14 +235,71 @@ class ProfileExecutor:
             raise ValueError(f"workspace does not exist: {self.workspace}")
         return workdir
 
-    def _locked_version(self, workdir: Path, package: str) -> str | None:
+    def _locked_versions(self, workdir: Path, package: str) -> list[str]:
+        versions: list[str] = []
         for relative in self.profile.lockfiles:
             path = workdir / relative
             if path.is_file():
-                version = self.profile.locked_version(path.read_text(encoding="utf-8"), package)
-                if version is not None:
-                    return version
-        return None
+                versions.extend(
+                    self.profile.locked_versions(path.read_text(encoding="utf-8"), package)
+                )
+        return versions
+
+    def _locked_versions_by_target(
+        self,
+        workdir: Path,
+        request: RemediationRequest,
+    ) -> dict[str, list[str]]:
+        return {
+            target.package: self._locked_versions(workdir, target.package)
+            for target in request.targets
+        }
+
+    def request_is_satisfied(
+        self,
+        request: RemediationRequest,
+        versions: dict[str, list[str]],
+    ) -> bool:
+        for target in request.targets:
+            current_versions = versions.get(target.package, [])
+            if not current_versions or not all(
+                self._at_least(version, target.minimum_version) for version in current_versions
+            ):
+                return False
+        return True
+
+    def evaluate_targets(
+        self,
+        request: RemediationRequest,
+        before: dict[str, list[str]],
+        after: dict[str, list[str]],
+    ) -> list[TargetResolution]:
+        resolutions: list[TargetResolution] = []
+        for target in request.targets:
+            versions_before = before.get(target.package, [])
+            versions_after = after.get(target.package, [])
+            if not versions_before:
+                satisfied = False
+                outcome: Literal["safe", "removed", "below_minimum", "missing"] = "missing"
+            elif not versions_after:
+                satisfied = True
+                outcome = "removed"
+            elif all(self._at_least(version, target.minimum_version) for version in versions_after):
+                satisfied = True
+                outcome = "safe"
+            else:
+                satisfied = False
+                outcome = "below_minimum"
+            resolutions.append(
+                TargetResolution(
+                    target=target,
+                    versions_before=versions_before,
+                    versions_after=versions_after,
+                    satisfied=satisfied,
+                    outcome=outcome,
+                )
+            )
+        return resolutions
 
     def _repo_path(self, path: str) -> str:
         return str(PurePosixPath(self.workspace) / PurePosixPath(path))

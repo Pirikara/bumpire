@@ -104,10 +104,12 @@ class PackageManagerProfile(BaseModel):
             raise ValueError(f"unsafe runtime version in profile input: {version!r}")
         return self.image_template.format(runtime_version=version)
 
-    def locked_version(self, lock_text: str, package: str) -> str | None:
+    def locked_versions(self, lock_text: str, package: str) -> list[str]:
         pattern = self.locked_version_pattern.replace("{package}", re.escape(package))
-        match = re.search(pattern, lock_text, re.MULTILINE | re.DOTALL)
-        return match.group("version") if match is not None else None
+        return [
+            match.group("version")
+            for match in re.finditer(pattern, lock_text, re.MULTILINE | re.DOTALL)
+        ]
 
     def validate_manifest_replacement(self, original: str, replacement: str) -> None:
         if self.manifest_policy.kind == "json-sections":

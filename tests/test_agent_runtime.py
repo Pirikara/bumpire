@@ -2,21 +2,28 @@ from io import StringIO
 
 import pytest
 
-from bumpire.agent_runtime import AutofixAgentContext, build_model, try_dependency_fix
+from bumpire.agent_runtime import (
+    AgentAutofixRunner,
+    AutofixAgentContext,
+    build_model,
+    try_dependency_fix,
+)
 from bumpire.events import EventLogger
 from bumpire.models import (
     AttemptResult,
-    DependencyIssue,
+    DependencyTarget,
     FileFixPlan,
     FileReplacement,
     ProjectState,
+    RemediationRequest,
+    TargetResolution,
 )
 
 
 class SuccessfulExecutor:
     def execute(
         self,
-        issue: DependencyIssue,
+        request: RemediationRequest,
         plan: FileFixPlan,
         *,
         attempt_number: int,
@@ -26,8 +33,15 @@ class SuccessfulExecutor:
             plan=plan,
             success=True,
             phase="completed",
-            target_before="4.17.20",
-            target_after=issue.safe_version,
+            target_resolutions=[
+                TargetResolution(
+                    target=request.targets[0],
+                    versions_before=["4.17.20"],
+                    versions_after=[request.targets[0].minimum_version],
+                    satisfied=True,
+                    outcome="safe",
+                )
+            ],
             changed_files=["package.json", "package-lock.json"],
             diff="verified diff",
         )
@@ -39,8 +53,15 @@ def _project() -> ProjectState:
         ecosystem="npm",
         package_manager="npm",
         lockfile_path="package-lock.json",
-        target_locked_version="4.17.20",
+        target_locked_versions={"lodash": ["4.17.20"]},
         manifest_documents={"package.json": manifest},
+    )
+
+
+def _request() -> RemediationRequest:
+    return RemediationRequest(
+        ecosystem="npm",
+        targets=[DependencyTarget(package="lodash", minimum_version="4.18.1")],
     )
 
 
@@ -53,10 +74,10 @@ def test_tool_schema_accepts_full_manifest_replacements() -> None:
 
 @pytest.mark.asyncio
 async def test_context_accepts_only_one_verified_fix() -> None:
-    issue = DependencyIssue(ecosystem="npm", package="lodash", safe_version="4.18.1")
+    request = _request()
     context = AutofixAgentContext(
         executor=SuccessfulExecutor(),  # type: ignore[arg-type]
-        issue=issue,
+        request=request,
         project=_project(),
         events=EventLogger(stream=StringIO()),
         max_attempts=3,
@@ -79,6 +100,38 @@ async def test_context_accepts_only_one_verified_fix() -> None:
     assert second["accepted"] is False
     assert second["success"] is True
     assert len(context.attempts) == 1
+
+
+class AlreadySafeExecutor:
+    def inspect(self, request: RemediationRequest) -> ProjectState:
+        return ProjectState(
+            ecosystem=request.ecosystem,
+            package_manager="npm",
+            lockfile_path="package-lock.json",
+            target_locked_versions={"lodash": ["4.18.1"]},
+            manifest_documents={"package.json": "{}"},
+        )
+
+    def request_is_satisfied(
+        self,
+        request: RemediationRequest,
+        versions: dict[str, list[str]],
+    ) -> bool:
+        return True
+
+
+@pytest.mark.asyncio
+async def test_runner_returns_already_safe_without_agent_turn() -> None:
+    runner = AgentAutofixRunner(
+        AlreadySafeExecutor(),  # type: ignore[arg-type]
+        EventLogger(stream=StringIO()),
+        model_name="openrouter/openrouter/free",
+    )
+
+    result = await runner.run(_request())
+
+    assert result.status == "already_safe"
+    assert result.attempts == []
 
 
 def test_build_model_routes_through_litellm() -> None:
