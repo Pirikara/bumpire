@@ -28,6 +28,7 @@ class SuccessfulExecutor:
         plan: FileFixPlan,
         *,
         attempt_number: int,
+        base_commit: str,
     ) -> AttemptResult:
         return AttemptResult(
             number=attempt_number,
@@ -51,6 +52,9 @@ class SuccessfulExecutor:
 def _project() -> ProjectState:
     manifest = '{"dependencies":{"lodash":"4.17.20"}}'
     return ProjectState(
+        base_commit="a" * 40,
+        base_ref="main",
+        workspace=".",
         ecosystem="npm",
         package_manager="npm",
         lockfile_path="package-lock.json",
@@ -111,6 +115,9 @@ async def test_context_accepts_only_one_verified_fix() -> None:
 class AlreadySatisfiedExecutor:
     def inspect(self, request: UpdateRequest) -> ProjectState:
         return ProjectState(
+            base_commit="a" * 40,
+            base_ref="main",
+            workspace=".",
             ecosystem=request.ecosystem,
             package_manager="npm",
             lockfile_path="package-lock.json",
