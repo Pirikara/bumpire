@@ -8,19 +8,48 @@ from typing import Literal
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 
-class DependencyIssue(BaseModel):
-    ecosystem: str
+class DependencyTarget(BaseModel):
     package: str
-    safe_version: str
-    advisory_id: str | None = None
+    minimum_version: str
+    advisory_ids: list[str] = Field(default_factory=list, max_length=32)
 
-    @field_validator("ecosystem", "package", "safe_version")
+    @field_validator("package", "minimum_version")
     @classmethod
     def non_empty_single_line(cls, value: str) -> str:
         value = value.strip()
         if not value or "\n" in value or "\r" in value:
             raise ValueError("must be a non-empty single-line value")
         return value
+
+    @field_validator("advisory_ids")
+    @classmethod
+    def valid_advisory_ids(cls, values: list[str]) -> list[str]:
+        normalized = [value.strip() for value in values]
+        if any(not value or "\n" in value or "\r" in value for value in normalized):
+            raise ValueError("advisory IDs must be non-empty single-line values")
+        if len(normalized) != len(set(normalized)):
+            raise ValueError("advisory IDs must be unique within a target")
+        return normalized
+
+
+class RemediationRequest(BaseModel):
+    ecosystem: str
+    targets: list[DependencyTarget] = Field(min_length=1, max_length=20)
+
+    @field_validator("ecosystem")
+    @classmethod
+    def non_empty_ecosystem(cls, value: str) -> str:
+        value = value.strip()
+        if not value or "\n" in value or "\r" in value:
+            raise ValueError("ecosystem must be a non-empty single-line value")
+        return value
+
+    @model_validator(mode="after")
+    def unique_packages(self) -> RemediationRequest:
+        packages = [target.package for target in self.targets]
+        if len(packages) != len(set(packages)):
+            raise ValueError("each package may appear only once per remediation request")
+        return self
 
 
 class FileReplacement(BaseModel):
@@ -71,9 +100,17 @@ class ProjectState(BaseModel):
     ecosystem: str
     package_manager: str
     lockfile_path: str
-    target_locked_version: str | None
+    target_locked_versions: dict[str, list[str]]
     manifest_documents: dict[str, str] = Field(default_factory=dict)
     profile_instructions: str | None = None
+
+
+class TargetResolution(BaseModel):
+    target: DependencyTarget
+    versions_before: list[str]
+    versions_after: list[str]
+    satisfied: bool
+    outcome: Literal["safe", "removed", "below_minimum", "missing"]
 
 
 class AttemptResult(BaseModel):
@@ -84,15 +121,14 @@ class AttemptResult(BaseModel):
     error: str | None = None
     stdout: str = ""
     stderr: str = ""
-    target_before: str | None = None
-    target_after: str | None = None
+    target_resolutions: list[TargetResolution] = Field(default_factory=list)
     changed_files: list[str] = Field(default_factory=list)
     diff: str = ""
 
 
 class FixResult(BaseModel):
-    status: Literal["fixed", "exhausted", "failed"]
-    issue: DependencyIssue
+    status: Literal["fixed", "already_safe", "exhausted", "failed"]
+    request: RemediationRequest
     attempts: list[AttemptResult]
     diff: str = ""
     changed_files: list[str] = Field(default_factory=list)

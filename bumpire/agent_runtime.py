@@ -20,11 +20,11 @@ from agents.extensions.models.litellm_model import LitellmModel
 from bumpire.events import EventLogger
 from bumpire.models import (
     AttemptResult,
-    DependencyIssue,
     FileFixPlan,
     FileReplacement,
     FixResult,
     ProjectState,
+    RemediationRequest,
 )
 from bumpire.profile_executor import ProfileExecutor
 
@@ -57,7 +57,7 @@ def build_model(
 @dataclass(slots=True)
 class AutofixAgentContext:
     executor: ProfileExecutor
-    issue: DependencyIssue
+    request: RemediationRequest
     project: ProjectState
     events: EventLogger
     max_attempts: int
@@ -75,7 +75,10 @@ class AutofixAgentContext:
                 "accepted": False,
                 "success": True,
                 "message": "a fix has already passed deterministic verification",
-                "target_after": successful.target_after,
+                "target_resolutions": [
+                    resolution.model_dump(mode="json")
+                    for resolution in successful.target_resolutions
+                ],
             }
         if len(self.attempts) >= self.max_attempts:
             return {
@@ -98,7 +101,7 @@ class AutofixAgentContext:
         self.events.emit("plan", plan.rationale, attempt=number, planner="profile-agent")
         attempt = await asyncio.to_thread(
             self.executor.execute,
-            self.issue,
+            self.request,
             plan,
             attempt_number=number,
         )
@@ -108,8 +111,9 @@ class AutofixAgentContext:
                 "accepted": True,
                 "success": True,
                 "phase": attempt.phase,
-                "target_before": attempt.target_before,
-                "target_after": attempt.target_after,
+                "target_resolutions": [
+                    resolution.model_dump(mode="json") for resolution in attempt.target_resolutions
+                ],
                 "changed_files": attempt.changed_files,
                 "message": (
                     "dependency resolution verification passed; stop and report completion "
@@ -172,11 +176,16 @@ class AgentAutofixRunner:
         self.max_attempts = max_attempts
         self.max_turns = max_turns
 
-    async def run(self, issue: DependencyIssue) -> FixResult:
-        project = self.executor.inspect(issue)
+    async def run(self, request: RemediationRequest) -> FixResult:
+        project = self.executor.inspect(request)
+        if self.executor.request_is_satisfied(request, project.target_locked_versions):
+            packages = ", ".join(target.package for target in request.targets)
+            self.events.emit("finish", f"Requested targets are already safe: {packages}")
+            return FixResult(status="already_safe", request=request, attempts=[])
+
         context = AutofixAgentContext(
             executor=self.executor,
-            issue=issue,
+            request=request,
             project=project,
             events=self.events,
             max_attempts=self.max_attempts,
@@ -192,7 +201,7 @@ class AgentAutofixRunner:
         try:
             await Runner.run(
                 agent,
-                self._input(issue, project),
+                self._input(request, project),
                 context=context,
                 max_turns=self.max_turns,
             )
@@ -203,13 +212,19 @@ class AgentAutofixRunner:
 
         successful = context.successful_attempt
         if successful is not None:
+            summary = ", ".join(
+                f"{resolution.target.package} "
+                f"{self._display_versions(resolution.versions_before)} → "
+                f"{self._display_versions(resolution.versions_after)}"
+                for resolution in successful.target_resolutions
+            )
             self.events.emit(
                 "finish",
-                f"Verified {issue.package} {successful.target_before} → {successful.target_after}",
+                f"Verified dependency targets: {summary}",
             )
             return FixResult(
                 status="fixed",
-                issue=issue,
+                request=request,
                 attempts=context.attempts,
                 diff=successful.diff,
                 changed_files=successful.changed_files,
@@ -218,13 +233,13 @@ class AgentAutofixRunner:
             status = "exhausted" if context.attempts else "failed"
             return FixResult(
                 status=status,
-                issue=issue,
+                request=request,
                 attempts=context.attempts,
                 error=runner_error,
             )
         return FixResult(
             status="exhausted",
-            issue=issue,
+            request=request,
             attempts=context.attempts,
             error="agent stopped without producing a deterministically verified fix",
         )
@@ -239,34 +254,40 @@ you may replace. Pass the complete new content of only the manifest files that n
 change; preserve unrelated content and formatting exactly when practical. Never return
 a partial snippet. Never edit a lockfile directly: the trusted resolver regenerates it.
 
-Start with the smallest reasonable dependency-manifest change. If resolution fails,
-inspect the returned stdout and stderr and try a materially different edit. Do not add,
-remove, or modify source code, scripts, registry sources, runtime configuration, or
-unrelated dependencies.
+Treat every requested target as one atomic remediation batch. Start with the smallest
+coherent dependency-manifest change that can make every target safe. If resolution fails
+or any target remains below its minimum version, inspect the returned evidence and try a
+materially different edit. Do not add, remove, or modify source code, scripts, registry
+sources, runtime configuration, or unrelated dependencies.
 
 Package-manager profile guidance:
 {profile_instructions}
 
 Only success=true from try_dependency_fix proves completion. Resolver success proves only
-that the dependency graph resolves, the target reaches the safe version, and changed
-files pass the allowlist. Never claim API, behavioral, or runtime compatibility because
-application tests run later in the destination repository's CI.
+that the dependency graph resolves, every requested target reaches its minimum version or
+is removed from the resolved graph, and changed files pass the allowlist. Never claim API,
+behavioral, or runtime compatibility because application tests run later in the
+destination repository's CI.
 """.strip()
 
     @staticmethod
-    def _input(issue: DependencyIssue, project: ProjectState) -> str:
+    def _input(request: RemediationRequest, project: ProjectState) -> str:
         return json.dumps(
             {
-                "task": "produce and verify a minimal dependency security fix",
-                "issue": issue.model_dump(mode="json"),
+                "task": "produce and verify one atomic dependency security remediation",
+                "request": request.model_dump(mode="json"),
                 "project": {
                     "ecosystem": project.ecosystem,
                     "package_manager_profile": project.package_manager,
                     "lockfile_path": project.lockfile_path,
-                    "target_locked_version": project.target_locked_version,
+                    "target_locked_versions": project.target_locked_versions,
                     "allowed_manifest_documents": project.manifest_documents,
                 },
             },
             ensure_ascii=False,
             indent=2,
         )
+
+    @staticmethod
+    def _display_versions(versions: list[str]) -> str:
+        return ",".join(versions) if versions else "removed"

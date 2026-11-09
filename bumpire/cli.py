@@ -12,7 +12,7 @@ from pathlib import Path
 from bumpire.agent_runtime import AgentAutofixRunner
 from bumpire.docker_runtime import DockerRuntime
 from bumpire.events import EventLogger
-from bumpire.models import DependencyIssue
+from bumpire.models import DependencyTarget, RemediationRequest
 from bumpire.profile import detect_profile
 from bumpire.profile_executor import ProfileExecutor
 
@@ -28,9 +28,20 @@ def _parser() -> argparse.ArgumentParser:
         default="auto",
         help="profile ecosystem to select when auto-detection is ambiguous",
     )
-    preview.add_argument("--package", required=True)
-    preview.add_argument("--safe-version", required=True)
-    preview.add_argument("--advisory-id")
+    preview.add_argument(
+        "--target",
+        action="append",
+        nargs=2,
+        metavar=("PACKAGE", "MINIMUM_VERSION"),
+        help="add a package and minimum safe version to the atomic remediation batch",
+    )
+    preview.add_argument("--package", help="single-target compatibility option")
+    preview.add_argument("--safe-version", help="single-target compatibility option")
+    preview.add_argument(
+        "--advisory-id",
+        action="append",
+        help="advisory ID for the package supplied through the compatibility options",
+    )
     preview.add_argument("--model", default=os.environ.get("BUMPIRE_MODEL", ""))
     preview.add_argument("--api-base", default=os.environ.get("BUMPIRE_API_BASE"))
     preview.add_argument(
@@ -53,12 +64,7 @@ async def _preview(args: argparse.Namespace) -> int:
     profile = detect_profile(repo, args.workspace, args.ecosystem)
     DockerRuntime.ensure_available()
     executor = ProfileExecutor(repo, args.workspace, events, profile)
-    issue = DependencyIssue(
-        ecosystem=profile.ecosystem,
-        package=args.package,
-        safe_version=args.safe_version,
-        advisory_id=args.advisory_id,
-    )
+    request = _request(args, profile.ecosystem)
     result = await AgentAutofixRunner(
         executor,
         events,
@@ -67,7 +73,7 @@ async def _preview(args: argparse.Namespace) -> int:
         max_turns=args.max_turns,
         api_key=_api_key(args),
         base_url=args.api_base,
-    ).run(issue)
+    ).run(request)
 
     if args.output and result.diff:
         args.output.write_text(result.diff, encoding="utf-8")
@@ -78,6 +84,9 @@ async def _preview(args: argparse.Namespace) -> int:
         print(result.diff)
         if args.output:
             print(f"\nPreview written to {args.output}", file=sys.stderr)
+    elif result.status == "already_safe":
+        packages = ", ".join(target.package for target in result.request.targets)
+        print(f"All requested targets are already safe: {packages}")
     else:
         print(f"AutoFix {result.status}: {result.error}", file=sys.stderr)
         for attempt in result.attempts:
@@ -88,14 +97,49 @@ async def _preview(args: argparse.Namespace) -> int:
                         "phase": attempt.phase,
                         "error": attempt.error,
                         "stderr": attempt.stderr,
+                        "target_resolutions": [
+                            resolution.model_dump(mode="json")
+                            for resolution in attempt.target_resolutions
+                        ],
                     },
                     ensure_ascii=False,
                 ),
                 file=sys.stderr,
             )
-    if result.status == "fixed":
+    if result.status in {"fixed", "already_safe"}:
         return 0
     return 1 if result.status == "failed" else 2
+
+
+def _request(args: argparse.Namespace, ecosystem: str) -> RemediationRequest:
+    batch_targets = args.target or []
+    uses_compatibility_options = bool(args.package or args.safe_version or args.advisory_id)
+    if batch_targets and uses_compatibility_options:
+        raise ValueError(
+            "--target cannot be combined with --package, --safe-version, or --advisory-id"
+        )
+    if batch_targets:
+        return RemediationRequest(
+            ecosystem=ecosystem,
+            targets=[
+                DependencyTarget(package=package, minimum_version=minimum_version)
+                for package, minimum_version in batch_targets
+            ],
+        )
+    if bool(args.package) != bool(args.safe_version):
+        raise ValueError("--package and --safe-version must be supplied together")
+    if not args.package:
+        raise ValueError("supply at least one --target, or --package with --safe-version")
+    return RemediationRequest(
+        ecosystem=ecosystem,
+        targets=[
+            DependencyTarget(
+                package=args.package,
+                minimum_version=args.safe_version,
+                advisory_ids=args.advisory_id or [],
+            )
+        ],
+    )
 
 
 def _api_key(args: argparse.Namespace) -> str | None:

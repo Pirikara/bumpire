@@ -102,6 +102,21 @@ uv run bumpire preview \
 Bumpire never modifies the supplied working tree. Every attempt runs in a temporary
 clone, and only the staged diff from a successful attempt is returned.
 
+To remediate multiple packages as one coherent update, repeat `--target`. The batch is
+atomic: Bumpire returns a patch only when every target reaches its minimum version (or
+is removed from the resolved dependency graph).
+
+```bash
+uv run bumpire preview \
+  --repo ../your-rails-project \
+  --target rails 7.2.3.2 \
+  --target activestorage 7.2.3.2 \
+  --model openrouter/openrouter/free \
+  --output bumpire.patch
+```
+
+`--package` with `--safe-version` remains available as a single-target shorthand.
+
 Use `--workspace path/to/app` for a package nested inside a monorepo. If multiple
 profiles match the same workspace, select one explicitly with `--ecosystem npm` or
 `--ecosystem bundler`.
@@ -111,7 +126,7 @@ profiles match the same workspace, select one explicitly with `--ecosystem npm` 
 | Bumpire's acceptance gate | Your repository's CI |
 |---|---|
 | Dependency graph resolves | Unit and integration tests |
-| Target resolves to at least the safe version | Build, lint, and type checking |
+| Every occurrence of every target reaches its minimum version, or is removed | Build, lint, and type checking |
 | Only profile-allowlisted files changed | Application behavior |
 | Agent did not edit the lockfile directly | API and runtime compatibility |
 | A non-empty staged diff exists | Deployment readiness |
@@ -119,6 +134,9 @@ profiles match the same workspace, select one explicitly with `--ecosystem npm` 
 Resolver success is deliberately narrow. Bumpire does not claim that the application is
 compatible; when the patch is included in a pull request, rely on the destination
 repository's CI for that judgment.
+
+All targets in one request must belong to the same package-manager profile and workspace.
+Cross-ecosystem or cross-workspace campaigns should be split into separate patches.
 
 ## Built-in profiles
 

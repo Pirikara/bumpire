@@ -6,7 +6,7 @@ lockfiles = ["package-lock.json"]
 image_template = "node:{runtime_version}-bookworm-slim"
 default_runtime_version = "22"
 default_manager_version = ""
-locked_version_pattern = '"node_modules/{package}"\s*:\s*\{.*?"version"\s*:\s*"(?P<version>[^"]+)"'
+locked_version_pattern = '"(?:[^"]*/)?node_modules/{package}"\s*:\s*\{[^{}]*?"version"\s*:\s*"(?P<version>[^"]+)"'
 instructions = """
 Edit package.json dependency fields only. Preserve unrelated metadata and formatting as
 closely as possible. For a local package peer conflict, update the root dependency and
@@ -22,8 +22,6 @@ if [ -n "${BUMPIRE_MANAGER_VERSION:-}" ]; then
   export PATH="/tmp/npm-global/bin:$PATH"
 fi
 npm install --package-lock-only --ignore-scripts --no-audit --no-fund
-resolved=$(node -e 'const fs=require("fs"); const lock=JSON.parse(fs.readFileSync("package-lock.json","utf8")); const p=process.argv[1]; const item=(lock.packages||{})["node_modules/"+p] || (lock.dependencies||{})[p]; if(!item || !item.version) process.exit(2); process.stdout.write(item.version)' "$BUMPIRE_PACKAGE")
-printf 'BUMPIRE_RESOLVED_VERSION=%s\n' "$resolved"
 '''
 
 [manifest_policy]

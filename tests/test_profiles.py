@@ -52,13 +52,10 @@ def test_npm_profile_detects_versions_manifests_and_locked_target(tmp_path: Path
         "package.json",
         "packages/peer/package.json",
     ]
-    assert (
-        profile.locked_version(
-            (tmp_path / "package-lock.json").read_text(encoding="utf-8"),
-            "lodash",
-        )
-        == "4.17.20"
-    )
+    assert profile.locked_versions(
+        (tmp_path / "package-lock.json").read_text(encoding="utf-8"),
+        "lodash",
+    ) == ["4.17.20"]
 
 
 def test_bundler_profile_extracts_versions_and_locked_target(tmp_path: Path) -> None:
@@ -81,13 +78,24 @@ BUNDLED WITH
     assert profile.runtime_version(tmp_path) == "ruby-3.3.10"
     assert profile.manager_version(tmp_path) == "4.0.10"
     assert profile.image(tmp_path) == "ruby:3.3.10-slim"
-    assert (
-        profile.locked_version(
-            (tmp_path / "Gemfile.lock").read_text(encoding="utf-8"),
-            "activestorage",
-        )
-        == "7.2.3.1"
+    assert profile.locked_versions(
+        (tmp_path / "Gemfile.lock").read_text(encoding="utf-8"),
+        "activestorage",
+    ) == ["7.2.3.1"]
+
+
+def test_npm_profile_extracts_every_nested_locked_occurrence() -> None:
+    profile = _profiles_by_name()["npm"]
+    lockfile = json.dumps(
+        {
+            "packages": {
+                "node_modules/lodash": {"version": "4.18.1"},
+                "node_modules/consumer/node_modules/lodash": {"version": "4.17.20"},
+            }
+        }
     )
+
+    assert profile.locked_versions(lockfile, "lodash") == ["4.18.1", "4.17.20"]
 
 
 def test_profile_detection_rejects_unknown_workspace(tmp_path: Path) -> None:
