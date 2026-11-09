@@ -8,12 +8,11 @@ from typing import Literal
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 
-class DependencyTarget(BaseModel):
-    package: str
-    minimum_version: str
-    advisory_ids: list[str] = Field(default_factory=list, max_length=32)
+class VersionRequirement(BaseModel):
+    kind: Literal["exact", "at_least"] = "exact"
+    version: str
 
-    @field_validator("package", "minimum_version")
+    @field_validator("version")
     @classmethod
     def non_empty_single_line(cls, value: str) -> str:
         value = value.strip()
@@ -21,18 +20,22 @@ class DependencyTarget(BaseModel):
             raise ValueError("must be a non-empty single-line value")
         return value
 
-    @field_validator("advisory_ids")
+
+class DependencyTarget(BaseModel):
+    package: str
+    requirement: VersionRequirement
+    allow_removal: bool = False
+
+    @field_validator("package")
     @classmethod
-    def valid_advisory_ids(cls, values: list[str]) -> list[str]:
-        normalized = [value.strip() for value in values]
-        if any(not value or "\n" in value or "\r" in value for value in normalized):
-            raise ValueError("advisory IDs must be non-empty single-line values")
-        if len(normalized) != len(set(normalized)):
-            raise ValueError("advisory IDs must be unique within a target")
-        return normalized
+    def non_empty_package(cls, value: str) -> str:
+        value = value.strip()
+        if not value or "\n" in value or "\r" in value:
+            raise ValueError("must be a non-empty single-line value")
+        return value
 
 
-class RemediationRequest(BaseModel):
+class UpdateRequest(BaseModel):
     ecosystem: str
     targets: list[DependencyTarget] = Field(min_length=1, max_length=20)
 
@@ -45,10 +48,10 @@ class RemediationRequest(BaseModel):
         return value
 
     @model_validator(mode="after")
-    def unique_packages(self) -> RemediationRequest:
+    def unique_packages(self) -> UpdateRequest:
         packages = [target.package for target in self.targets]
         if len(packages) != len(set(packages)):
-            raise ValueError("each package may appear only once per remediation request")
+            raise ValueError("each package may appear only once per update request")
         return self
 
 
@@ -105,12 +108,20 @@ class ProjectState(BaseModel):
     profile_instructions: str | None = None
 
 
-class TargetResolution(BaseModel):
+class TargetVerification(BaseModel):
     target: DependencyTarget
     versions_before: list[str]
     versions_after: list[str]
     satisfied: bool
-    outcome: Literal["safe", "removed", "below_minimum", "missing"]
+    outcome: Literal[
+        "satisfied",
+        "removed",
+        "removal_disallowed",
+        "constraint_mismatch",
+        "missing",
+        "invalid_version",
+    ]
+    error: str | None = None
 
 
 class AttemptResult(BaseModel):
@@ -121,14 +132,14 @@ class AttemptResult(BaseModel):
     error: str | None = None
     stdout: str = ""
     stderr: str = ""
-    target_resolutions: list[TargetResolution] = Field(default_factory=list)
+    target_verifications: list[TargetVerification] = Field(default_factory=list)
     changed_files: list[str] = Field(default_factory=list)
     diff: str = ""
 
 
-class FixResult(BaseModel):
-    status: Literal["fixed", "already_safe", "exhausted", "failed"]
-    request: RemediationRequest
+class UpdateResult(BaseModel):
+    status: Literal["updated", "already_satisfied", "exhausted", "failed"]
+    request: UpdateRequest
     attempts: list[AttemptResult]
     diff: str = ""
     changed_files: list[str] = Field(default_factory=list)

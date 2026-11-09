@@ -36,7 +36,7 @@ class GitSandbox:
         self.workdir: Path | None = None
 
     def __enter__(self) -> Self:
-        self.events.emit("sandbox", "Creating isolated workspace for AutoFix")
+        self.events.emit("sandbox", "Creating isolated workspace for dependency update")
         self._temporary = tempfile.TemporaryDirectory(prefix="bumpire-")
         destination = Path(self._temporary.name) / "repository"
         clone_args = [*_GIT, "clone", "--depth", "1"]

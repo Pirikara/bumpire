@@ -22,9 +22,9 @@ from bumpire.models import (
     AttemptResult,
     FileFixPlan,
     FileReplacement,
-    FixResult,
     ProjectState,
-    RemediationRequest,
+    UpdateRequest,
+    UpdateResult,
 )
 from bumpire.profile_executor import ProfileExecutor
 
@@ -55,9 +55,9 @@ def build_model(
 
 
 @dataclass(slots=True)
-class AutofixAgentContext:
+class UpdateAgentContext:
     executor: ProfileExecutor
-    request: RemediationRequest
+    request: UpdateRequest
     project: ProjectState
     events: EventLogger
     max_attempts: int
@@ -75,9 +75,9 @@ class AutofixAgentContext:
                 "accepted": False,
                 "success": True,
                 "message": "a fix has already passed deterministic verification",
-                "target_resolutions": [
-                    resolution.model_dump(mode="json")
-                    for resolution in successful.target_resolutions
+                "target_verifications": [
+                    verification.model_dump(mode="json")
+                    for verification in successful.target_verifications
                 ],
             }
         if len(self.attempts) >= self.max_attempts:
@@ -111,8 +111,9 @@ class AutofixAgentContext:
                 "accepted": True,
                 "success": True,
                 "phase": attempt.phase,
-                "target_resolutions": [
-                    resolution.model_dump(mode="json") for resolution in attempt.target_resolutions
+                "target_verifications": [
+                    verification.model_dump(mode="json")
+                    for verification in attempt.target_verifications
                 ],
                 "changed_files": attempt.changed_files,
                 "message": (
@@ -132,15 +133,15 @@ class AutofixAgentContext:
 
 
 @function_tool
-async def try_dependency_fix(
-    wrapper: RunContextWrapper[AutofixAgentContext],
+async def try_dependency_update(
+    wrapper: RunContextWrapper[UpdateAgentContext],
     rationale: str,
     files: list[FileReplacement],
 ) -> str:
     """Try complete replacement contents for dependency manifests in a fresh sandbox.
 
     Args:
-        rationale: Why these manifest replacements should produce the safe dependency graph.
+        rationale: Why these manifest replacements should satisfy the requested policies.
         files: Full new contents of each dependency manifest that needs to change.
     """
     try:
@@ -154,7 +155,7 @@ async def try_dependency_fix(
     return json.dumps(observation, ensure_ascii=False)
 
 
-class AgentAutofixRunner:
+class AgentUpdateRunner:
     def __init__(
         self,
         executor: ProfileExecutor,
@@ -172,29 +173,37 @@ class AgentAutofixRunner:
             raise ValueError("max_turns must be at least 2")
         self.executor = executor
         self.events = events
-        self.model = build_model(model_name, api_key=api_key, base_url=base_url)
+        self.model_name = model_name
+        self.api_key = api_key
+        self.base_url = base_url
         self.max_attempts = max_attempts
         self.max_turns = max_turns
 
-    async def run(self, request: RemediationRequest) -> FixResult:
+    async def run(self, request: UpdateRequest) -> UpdateResult:
         project = self.executor.inspect(request)
         if self.executor.request_is_satisfied(request, project.target_locked_versions):
             packages = ", ".join(target.package for target in request.targets)
-            self.events.emit("finish", f"Requested targets are already safe: {packages}")
-            return FixResult(status="already_safe", request=request, attempts=[])
+            self.events.emit(
+                "finish", f"Requested targets already satisfy their policies: {packages}"
+            )
+            return UpdateResult(status="already_satisfied", request=request, attempts=[])
 
-        context = AutofixAgentContext(
+        context = UpdateAgentContext(
             executor=self.executor,
             request=request,
             project=project,
             events=self.events,
             max_attempts=self.max_attempts,
         )
-        agent = Agent[AutofixAgentContext](
-            name="Profile-driven dependency AutoFix planner",
-            model=self.model,
+        agent = Agent[UpdateAgentContext](
+            name="Profile-driven dependency update planner",
+            model=build_model(
+                self.model_name,
+                api_key=self.api_key,
+                base_url=self.base_url,
+            ),
             instructions=self._instructions(project),
-            tools=[try_dependency_fix],
+            tools=[try_dependency_update],
         )
         set_tracing_disabled(True)
         runner_error: str | None = None
@@ -213,17 +222,17 @@ class AgentAutofixRunner:
         successful = context.successful_attempt
         if successful is not None:
             summary = ", ".join(
-                f"{resolution.target.package} "
-                f"{self._display_versions(resolution.versions_before)} → "
-                f"{self._display_versions(resolution.versions_after)}"
-                for resolution in successful.target_resolutions
+                f"{verification.target.package} "
+                f"{self._display_versions(verification.versions_before)} → "
+                f"{self._display_versions(verification.versions_after)}"
+                for verification in successful.target_verifications
             )
             self.events.emit(
                 "finish",
                 f"Verified dependency targets: {summary}",
             )
-            return FixResult(
-                status="fixed",
+            return UpdateResult(
+                status="updated",
                 request=request,
                 attempts=context.attempts,
                 diff=successful.diff,
@@ -231,13 +240,13 @@ class AgentAutofixRunner:
             )
         if runner_error is not None:
             status = "exhausted" if context.attempts else "failed"
-            return FixResult(
+            return UpdateResult(
                 status=status,
                 request=request,
                 attempts=context.attempts,
                 error=runner_error,
             )
-        return FixResult(
+        return UpdateResult(
             status="exhausted",
             request=request,
             attempts=context.attempts,
@@ -248,33 +257,33 @@ class AgentAutofixRunner:
     def _instructions(project: ProjectState) -> str:
         profile_instructions = project.profile_instructions or ""
         return f"""
-You are a dependency remediation planner operating through one constrained tool.
-You MUST call try_dependency_fix before claiming success. The input contains every manifest
+You are a dependency update planner operating through one constrained tool.
+You MUST call try_dependency_update before claiming success. The input contains every manifest
 you may replace. Pass the complete new content of only the manifest files that need a
 change; preserve unrelated content and formatting exactly when practical. Never return
 a partial snippet. Never edit a lockfile directly: the trusted resolver regenerates it.
 
-Treat every requested target as one atomic remediation batch. Start with the smallest
-coherent dependency-manifest change that can make every target safe. If resolution fails
-or any target remains below its minimum version, inspect the returned evidence and try a
+Treat every requested target as one atomic update batch. Start with the smallest coherent
+dependency-manifest change that can satisfy every target's explicit version policy. If
+resolution or deterministic verification fails, inspect the returned evidence and try a
 materially different edit. Do not add, remove, or modify source code, scripts, registry
-sources, runtime configuration, or unrelated dependencies.
+sources, runtime configuration, or unrelated dependencies. Do not remove a requested
+target unless its policy explicitly permits removal.
 
 Package-manager profile guidance:
 {profile_instructions}
 
-Only success=true from try_dependency_fix proves completion. Resolver success proves only
-that the dependency graph resolves, every requested target reaches its minimum version or
-is removed from the resolved graph, and changed files pass the allowlist. Never claim API,
-behavioral, or runtime compatibility because application tests run later in the
-destination repository's CI.
+Only success=true from try_dependency_update proves completion. Resolver success proves
+only that the dependency graph resolves, every requested target satisfies its declared
+policy, and changed files pass the allowlist. Never claim API, behavioral, or runtime
+compatibility because application tests run later in the destination repository's CI.
 """.strip()
 
     @staticmethod
-    def _input(request: RemediationRequest, project: ProjectState) -> str:
+    def _input(request: UpdateRequest, project: ProjectState) -> str:
         return json.dumps(
             {
-                "task": "produce and verify one atomic dependency security remediation",
+                "task": "produce and verify one atomic dependency update",
                 "request": request.model_dump(mode="json"),
                 "project": {
                     "ecosystem": project.ecosystem,

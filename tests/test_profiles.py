@@ -15,6 +15,8 @@ def test_builtin_profiles_are_declarative_and_complete() -> None:
     profiles = _profiles_by_name()
 
     assert set(profiles) == {"bundler", "npm"}
+    assert profiles["npm"].version_scheme == "semver"
+    assert profiles["bundler"].version_scheme == "rubygems"
     assert "npm install --package-lock-only" in profiles["npm"].resolver_script
     assert "bundle lock" in profiles["bundler"].resolver_script
 
@@ -84,6 +86,15 @@ BUNDLED WITH
     ) == ["7.2.3.1"]
 
 
+def test_bundler_profile_excludes_platform_from_locked_version() -> None:
+    profile = _profiles_by_name()["bundler"]
+
+    assert profile.locked_versions(
+        "    nokogiri (1.18.10-arm64-darwin)\n",
+        "nokogiri",
+    ) == ["1.18.10"]
+
+
 def test_npm_profile_extracts_every_nested_locked_occurrence() -> None:
     profile = _profiles_by_name()["npm"]
     lockfile = json.dumps(
@@ -145,16 +156,21 @@ def test_npm_manifest_policy_rejects_new_protected_null_field() -> None:
 
 def test_bundler_manifest_policy_allows_gems_but_protects_sources() -> None:
     profile = _profiles_by_name()["bundler"]
-    original = 'source "https://rubygems.org"\n\ngem "rails", "7.2.3.1"\n'
+    original = 'source "https://rubygems.org"\n\ngem "rails", "7.2.3.1"\ngem "puma", "6.4.0"\n'
 
     profile.validate_manifest_replacement(
         original,
-        'source "https://rubygems.org"\n\ngem "rails", "7.2.3.2"\n',
+        'source "https://rubygems.org"\n\ngem "rails", "7.2.3.2"\ngem "puma", "6.4.0"\n',
     )
     with pytest.raises(ValueError, match="outside the profile policy"):
         profile.validate_manifest_replacement(
             original,
-            'source "https://example.invalid"\n\ngem "rails", "7.2.3.2"\n',
+            'source "https://example.invalid"\n\ngem "rails", "7.2.3.2"\ngem "puma", "6.4.0"\n',
+        )
+    with pytest.raises(ValueError, match="declarations may not be removed"):
+        profile.validate_manifest_replacement(
+            original,
+            'source "https://rubygems.org"\n\ngem "rails", "7.2.3.2"\n',
         )
 
 

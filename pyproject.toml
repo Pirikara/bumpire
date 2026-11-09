@@ -1,13 +1,12 @@
 [project]
 name = "bumpire"
-version = "0.1.0"
+version = "0.2.0"
 description = "Bumpire: agentic dependency updates with deterministic verification"
 readme = "README.md"
 license = { text = "Apache-2.0" }
 requires-python = ">=3.12"
 dependencies = [
   "openai-agents[litellm]>=0.19.0,<0.20",
-  "packaging>=24.0",
   "pydantic>=2.11.0,<3",
 ]
 
