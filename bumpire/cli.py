@@ -7,66 +7,153 @@ import asyncio
 import json
 import os
 import sys
+from dataclasses import asdict
 from pathlib import Path
 
 from bumpire.agent_runtime import AgentUpdateRunner
 from bumpire.docker_runtime import DockerRuntime
 from bumpire.events import EventLogger
-from bumpire.models import DependencyTarget, UpdateRequest, VersionRequirement
+from bumpire.models import (
+    DependencyTarget,
+    UpdateRequest,
+    UpdateResult,
+    VerifiedUpdateArtifact,
+    VersionRequirement,
+)
 from bumpire.profile import detect_profile
 from bumpire.profile_executor import ProfileExecutor
+from bumpire.publisher import GitHubPublisher
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="bumpire")
     subcommands = parser.add_subparsers(dest="command", required=True)
     preview = subcommands.add_parser("preview", help="generate a verified dependency-update diff")
-    preview.add_argument("--repo", type=Path, required=True)
-    preview.add_argument("--workspace", default=".")
-    preview.add_argument(
+    publish = subcommands.add_parser("publish", help="open a verified GitHub draft pull request")
+    for command in (preview, publish):
+        _add_update_arguments(command)
+    publish.add_argument("--remote", default="origin", help="Git remote used for publication")
+    publish.add_argument(
+        "--artifact-input",
+        type=Path,
+        help="publish a previously verified artifact without running the agent again",
+    )
+    publish.add_argument(
+        "--base",
+        help="remote base branch; defaults to the branch recorded in the artifact",
+    )
+    return parser
+
+
+def _add_update_arguments(command: argparse.ArgumentParser) -> None:
+    command.add_argument("--repo", type=Path, required=True)
+    command.add_argument("--workspace", default=".")
+    command.add_argument(
         "--ecosystem",
         default="auto",
         help="profile ecosystem to select when auto-detection is ambiguous",
     )
-    preview.add_argument(
+    command.add_argument(
         "--target",
         action="append",
         nargs=2,
         metavar=("PACKAGE", "REQUIREMENT"),
         help="add an exact version or an explicit >= version policy to the atomic update",
     )
-    preview.add_argument(
+    command.add_argument(
         "--allow-removal",
         action="append",
         default=[],
         metavar="PACKAGE",
         help="allow a requested package to disappear from the resolved dependency graph",
     )
-    preview.add_argument("--package", help="single-target compatibility option")
-    preview.add_argument("--safe-version", help="single-target compatibility option")
-    preview.add_argument("--model", default=os.environ.get("BUMPIRE_MODEL", ""))
-    preview.add_argument("--api-base", default=os.environ.get("BUMPIRE_API_BASE"))
-    preview.add_argument(
+    command.add_argument("--package", help="single-target compatibility option")
+    command.add_argument("--safe-version", help="single-target compatibility option")
+    command.add_argument("--model", default=os.environ.get("BUMPIRE_MODEL", ""))
+    command.add_argument("--api-base", default=os.environ.get("BUMPIRE_API_BASE"))
+    command.add_argument(
         "--api-key-env",
         help="read an explicit LiteLLM API key from this environment variable",
     )
-    preview.add_argument("--max-attempts", type=int, default=5)
-    preview.add_argument("--max-turns", type=int, default=12)
-    preview.add_argument("--output", type=Path)
-    preview.add_argument(
+    command.add_argument("--max-attempts", type=int, default=5)
+    command.add_argument("--max-turns", type=int, default=12)
+    command.add_argument("--output", type=Path)
+    command.add_argument(
         "--artifact-output",
         type=Path,
         help="write the verified update artifact as JSON",
     )
-    preview.add_argument("--json", action="store_true")
-    return parser
+    command.add_argument("--json", action="store_true")
 
 
 async def _preview(args: argparse.Namespace) -> int:
     events = EventLogger(json_lines=args.json)
-    repo = args.repo.expanduser().resolve()
-    if not (repo / ".git").exists():
-        raise ValueError(f"--repo must be a Git repository: {repo}")
+    _, result = await _generate_update(args, events)
+    _write_outputs(args, result)
+
+    if args.json:
+        print(result.model_dump_json(indent=2))
+    elif result.status == "updated":
+        print(result.diff)
+        if args.output:
+            print(f"\nPreview written to {args.output}", file=sys.stderr)
+        if args.artifact_output:
+            print(f"Artifact written to {args.artifact_output}", file=sys.stderr)
+    elif result.status == "already_satisfied":
+        _print_already_satisfied(result)
+    else:
+        _print_failed_update(result)
+    return _update_exit_code(result)
+
+
+async def _publish(args: argparse.Namespace) -> int:
+    events = EventLogger(json_lines=args.json)
+    repo = _repository(args)
+    if args.artifact_input:
+        _validate_artifact_publish_args(args)
+        artifact = VerifiedUpdateArtifact.model_validate_json(
+            args.artifact_input.read_text(encoding="utf-8")
+        )
+        if args.output:
+            args.output.write_text(artifact.diff, encoding="utf-8")
+        if args.artifact_output:
+            args.artifact_output.write_text(artifact.model_dump_json(indent=2), encoding="utf-8")
+    else:
+        _, result = await _generate_update(args, events, repo=repo)
+        _write_outputs(args, result)
+        if result.status == "already_satisfied":
+            if args.json:
+                print(result.model_dump_json(indent=2))
+            else:
+                _print_already_satisfied(result)
+            return 0
+        if result.status != "updated" or result.artifact is None:
+            if args.json:
+                print(result.model_dump_json(indent=2))
+            else:
+                _print_failed_update(result)
+            return _update_exit_code(result)
+        artifact = result.artifact
+
+    publication = await asyncio.to_thread(
+        GitHubPublisher(repo, events, remote=args.remote).publish,
+        artifact,
+        base_ref=args.base,
+    )
+    if args.json:
+        print(json.dumps(asdict(publication), indent=2))
+    else:
+        print(publication.pull_request_url)
+    return 0
+
+
+async def _generate_update(
+    args: argparse.Namespace,
+    events: EventLogger,
+    *,
+    repo: Path | None = None,
+) -> tuple[Path, UpdateResult]:
+    repo = repo or _repository(args)
 
     profile = detect_profile(repo, args.workspace, args.ecosystem)
     DockerRuntime.ensure_available()
@@ -81,7 +168,22 @@ async def _preview(args: argparse.Namespace) -> int:
         api_key=_api_key(args),
         base_url=args.api_base,
     ).run(request)
+    return repo, result
 
+
+def _repository(args: argparse.Namespace) -> Path:
+    repo = args.repo.expanduser().resolve()
+    if not (repo / ".git").exists():
+        raise ValueError(f"--repo must be a Git repository: {repo}")
+    return repo
+
+
+def _validate_artifact_publish_args(args: argparse.Namespace) -> None:
+    if args.target or args.package or args.safe_version or args.allow_removal:
+        raise ValueError("--artifact-input cannot be combined with update target options")
+
+
+def _write_outputs(args: argparse.Namespace, result: UpdateResult) -> None:
     if args.output and result.diff:
         args.output.write_text(result.diff, encoding="utf-8")
     if args.artifact_output:
@@ -89,36 +191,34 @@ async def _preview(args: argparse.Namespace) -> int:
             raise ValueError("no verified update artifact was produced")
         args.artifact_output.write_text(result.artifact.model_dump_json(indent=2), encoding="utf-8")
 
-    if args.json:
-        print(result.model_dump_json(indent=2))
-    elif result.status == "updated":
-        print(result.diff)
-        if args.output:
-            print(f"\nPreview written to {args.output}", file=sys.stderr)
-        if args.artifact_output:
-            print(f"Artifact written to {args.artifact_output}", file=sys.stderr)
-    elif result.status == "already_satisfied":
-        packages = ", ".join(target.package for target in result.request.targets)
-        print(f"All requested targets already satisfy their policies: {packages}")
-    else:
-        print(f"Update {result.status}: {result.error}", file=sys.stderr)
-        for attempt in result.attempts:
-            print(
-                json.dumps(
-                    {
-                        "attempt": attempt.number,
-                        "phase": attempt.phase,
-                        "error": attempt.error,
-                        "stderr": attempt.stderr,
-                        "target_verifications": [
-                            verification.model_dump(mode="json")
-                            for verification in attempt.target_verifications
-                        ],
-                    },
-                    ensure_ascii=False,
-                ),
-                file=sys.stderr,
-            )
+
+def _print_already_satisfied(result: UpdateResult) -> None:
+    packages = ", ".join(target.package for target in result.request.targets)
+    print(f"All requested targets already satisfy their policies: {packages}")
+
+
+def _print_failed_update(result: UpdateResult) -> None:
+    print(f"Update {result.status}: {result.error}", file=sys.stderr)
+    for attempt in result.attempts:
+        print(
+            json.dumps(
+                {
+                    "attempt": attempt.number,
+                    "phase": attempt.phase,
+                    "error": attempt.error,
+                    "stderr": attempt.stderr,
+                    "target_verifications": [
+                        verification.model_dump(mode="json")
+                        for verification in attempt.target_verifications
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+            file=sys.stderr,
+        )
+
+
+def _update_exit_code(result: UpdateResult) -> int:
     if result.status in {"updated", "already_satisfied"}:
         return 0
     return 1 if result.status == "failed" else 2
@@ -193,7 +293,8 @@ def _api_key(args: argparse.Namespace) -> str | None:
 def main() -> None:
     args = _parser().parse_args()
     try:
-        code = asyncio.run(_preview(args))
+        operation = _publish if args.command == "publish" else _preview
+        code = asyncio.run(operation(args))
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"bumpire: {exc}", file=sys.stderr)
         code = 1

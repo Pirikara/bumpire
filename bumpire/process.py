@@ -28,7 +28,10 @@ def run_command(
     cwd: Path,
     timeout: int = 300,
     extra_env: dict[str, str] | None = None,
+    output_limit: int = _OUTPUT_LIMIT,
 ) -> CommandResult:
+    if output_limit < 1:
+        raise ValueError("output_limit must be positive")
     env = os.environ.copy()
     if extra_env:
         env.update(extra_env)
@@ -49,14 +52,14 @@ def run_command(
         return CommandResult(
             args=tuple(args),
             returncode=124,
-            stdout=stdout[-_OUTPUT_LIMIT:],
-            stderr=f"{stderr}\n{message}".strip()[-_OUTPUT_LIMIT:],
+            stdout=stdout[-output_limit:],
+            stderr=f"{stderr}\n{message}".strip()[-output_limit:],
         )
     return CommandResult(
         args=tuple(args),
         returncode=completed.returncode,
-        stdout=completed.stdout[-_OUTPUT_LIMIT:],
-        stderr=completed.stderr[-_OUTPUT_LIMIT:],
+        stdout=completed.stdout[-output_limit:],
+        stderr=completed.stderr[-output_limit:],
     )
 
 

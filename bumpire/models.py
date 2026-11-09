@@ -17,7 +17,7 @@ class VersionRequirement(BaseModel):
     @classmethod
     def non_empty_single_line(cls, value: str) -> str:
         value = value.strip()
-        if not value or "\n" in value or "\r" in value:
+        if not value or "\n" in value or "\r" in value or "\x00" in value:
             raise ValueError("must be a non-empty single-line value")
         return value
 
@@ -31,7 +31,7 @@ class DependencyTarget(BaseModel):
     @classmethod
     def non_empty_package(cls, value: str) -> str:
         value = value.strip()
-        if not value or "\n" in value or "\r" in value:
+        if not value or "\n" in value or "\r" in value or "\x00" in value:
             raise ValueError("must be a non-empty single-line value")
         return value
 
@@ -44,7 +44,7 @@ class UpdateRequest(BaseModel):
     @classmethod
     def non_empty_ecosystem(cls, value: str) -> str:
         value = value.strip()
-        if not value or "\n" in value or "\r" in value:
+        if not value or "\n" in value or "\r" in value or "\x00" in value:
             raise ValueError("ecosystem must be a non-empty single-line value")
         return value
 
@@ -127,7 +127,7 @@ class ProjectState(BaseModel):
         if value is None:
             return None
         normalized = value.strip()
-        if not normalized or "\n" in normalized or "\r" in normalized:
+        if not normalized or "\n" in normalized or "\r" in normalized or "\x00" in normalized:
             raise ValueError("base_ref must be a non-empty single-line value")
         return normalized
 
