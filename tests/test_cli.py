@@ -7,6 +7,22 @@ def _parse(*arguments: str):
     return _parser().parse_args(["preview", "--repo", ".", *arguments])
 
 
+def test_publish_parser_reuses_update_inputs() -> None:
+    args = _parser().parse_args(["publish", "--repo", ".", "--target", "lodash", "4.18.1"])
+
+    assert args.command == "publish"
+    assert args.target == [["lodash", "4.18.1"]]
+    assert args.remote == "origin"
+    assert args.base is None
+
+
+def test_publish_parser_accepts_a_verified_artifact() -> None:
+    args = _parser().parse_args(["publish", "--repo", ".", "--artifact-input", "verified.json"])
+
+    assert args.artifact_input.name == "verified.json"
+    assert args.target is None
+
+
 def test_repeated_targets_form_one_batch() -> None:
     request = _request(
         _parse("--target", "rails", "7.2.3.2", "--target", "activestorage", "7.2.3.2"),

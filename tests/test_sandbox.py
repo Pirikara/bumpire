@@ -63,3 +63,23 @@ def test_sandbox_is_pinned_to_the_requested_base_commit(tmp_path) -> None:
         assert sandbox.workdir is not None
         assert (sandbox.workdir / "manifest.txt").read_text(encoding="utf-8") == "first\n"
         assert sandbox.command(["git", "rev-parse", "HEAD"]).stdout.strip() == first_commit
+
+
+def test_staged_diff_is_not_truncated_at_the_command_log_limit(tmp_path) -> None:
+    repo = tmp_path / "source"
+    repo.mkdir()
+    _git(repo, "init", "-b", "main")
+    _git(repo, "config", "user.name", "Test")
+    _git(repo, "config", "user.email", "test@example.invalid")
+    (repo / "manifest.txt").write_text("before\n", encoding="utf-8")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "fixture")
+
+    with GitSandbox(repo, ".", EventLogger(stream=StringIO())) as sandbox:
+        assert sandbox.workdir is not None
+        (sandbox.workdir / "manifest.txt").write_text("x\n" * 20_000, encoding="utf-8")
+        sandbox.stage(["manifest.txt"])
+        diff = sandbox.staged_diff()
+
+    assert diff.startswith("diff --git")
+    assert len(diff) > 20_000

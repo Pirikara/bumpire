@@ -32,9 +32,8 @@ It handles cases such as:
 - an initial proposal rejected by the package manager, requiring another agent turn.
 
 > [!IMPORTANT]
-> Bumpire is an early-stage experiment. It currently generates a verified patch and a
-> machine-readable update artifact; branch creation, GitHub pull requests, and private
-> registry authentication are not implemented yet.
+> Bumpire is an early-stage experiment. It can generate a verified patch or publish a
+> GitHub draft pull request. Private registry authentication is not implemented yet.
 
 ## Why Bumpire?
 
@@ -81,6 +80,7 @@ file permissions, version checks, and termination remain deterministic.
 - [uv](https://docs.astral.sh/uv/)
 - Docker with a running daemon
 - an API key for any [LiteLLM-supported provider](https://docs.litellm.ai/docs/providers)
+- [GitHub CLI](https://cli.github.com/) authenticated for repositories used with `publish`
 
 ### Install from source
 
@@ -139,6 +139,38 @@ default; opt in for a specific package with `--allow-removal PACKAGE`.
 
 The legacy `--package` with `--safe-version` form maps to an `at_least` policy.
 
+### Publish a draft pull request
+
+Use `publish` with the same update inputs to verify the update, push a dedicated branch,
+and open a GitHub draft pull request:
+
+```bash
+uv run bumpire publish \
+  --repo ../your-project \
+  --target lodash 4.18.1 \
+  --model openrouter/openrouter/free
+```
+
+Publishing is deliberately conservative:
+
+- the remote base branch must still point to the artifact's verified commit;
+- the patch is reapplied in a fresh clone and its digest and changed files are rechecked;
+- branch names are deterministic, so a retry reuses an identical branch and pull request;
+- a branch collision with different content is rejected;
+- pull requests are always created as drafts and are never merged by Bumpire.
+
+Git credentials remain in the publisher process. They are not passed to the model or the
+resolver container.
+
+If pushing succeeds but pull-request creation is interrupted, retry from the exact saved
+evidence instead of asking the model for another proposal:
+
+```bash
+uv run bumpire publish \
+  --repo ../your-project \
+  --artifact-input bumpire-artifact.json
+```
+
 Use `--workspace path/to/app` for a package nested inside a monorepo. If multiple
 profiles match the same workspace, select one explicitly with `--ecosystem npm` or
 `--ecosystem bundler`.
@@ -174,7 +206,7 @@ Successful updates can be exported as JSON with `--artifact-output`. The artifac
 
 The schema rejects altered patch content, incomplete target evidence, failed target
 verification, and inconsistent request metadata. This artifact is the handoff boundary
-for a future GitHub publisher; it is not an agent-authored success claim.
+to the GitHub publisher; it is not an agent-authored success claim.
 
 ## Built-in profiles
 

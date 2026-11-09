@@ -194,7 +194,13 @@ class GitSandbox:
     def staged_diff(self) -> str:
         if self.clone_root is None:
             raise RuntimeError("sandbox is not active")
-        result = run_command([*_GIT, "diff", "--cached", "--no-ext-diff"], cwd=self.clone_root)
+        result = run_command(
+            [*_GIT, "diff", "--cached", "--no-ext-diff"],
+            cwd=self.clone_root,
+            output_limit=5_000_001,
+        )
         if not result.ok:
             raise RuntimeError(result.stderr)
+        if len(result.stdout) > 5_000_000:
+            raise ValueError("staged diff exceeds the 5 MB artifact limit")
         return result.stdout

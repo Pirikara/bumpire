@@ -19,3 +19,14 @@ def test_timeout_becomes_bounded_command_result(monkeypatch, tmp_path) -> None:
     assert result.returncode == 124
     assert result.stdout == "partial stdout"
     assert result.stderr.endswith("command timed out after 3 seconds")
+
+
+def test_command_can_opt_into_a_larger_bounded_output(tmp_path) -> None:
+    result = run_command(
+        ["python3", "-c", "print('x' * 30000)"],
+        cwd=tmp_path,
+        output_limit=40_000,
+    )
+
+    assert result.ok
+    assert len(result.stdout) == 30_001
