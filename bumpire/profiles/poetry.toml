@@ -1,0 +1,123 @@
+name = "poetry"
+ecosystem = "poetry"
+detect_all = ["pyproject.toml", "poetry.lock"]
+manifest_globs = ["pyproject.toml"]
+lockfiles = ["poetry.lock"]
+image_template = "python:{runtime_version}-slim"
+default_runtime_version = "3.12"
+default_manager_version = "2.5.1"
+instructions = """
+Edit dependency declarations in pyproject.toml only. Preserve project metadata, Python
+runtime constraints, scripts, build settings, package sources, plugins, and unrelated
+dependencies. Coordinate PEP 621 requirements, optional dependencies, PEP 735 groups,
+and Poetry dependency groups when they block an exact target. For a transitive target,
+prefer updating its direct parent; add an exact direct pin only when Poetry cannot select
+the requested version otherwise. Never edit poetry.lock directly; Poetry owns it. Resolve
+every target to its exact requested version as one coherent update.
+"""
+resolve_script = '''
+mkdir -p "$HOME" /tmp/pip-cache /tmp/poetry-cache /tmp/poetry-config /tmp/poetry-data /bumpire-tools/poetry
+export PIP_CACHE_DIR=/tmp/pip-cache
+export POETRY_CACHE_DIR=/tmp/poetry-cache
+export POETRY_CONFIG_DIR=/tmp/poetry-config
+export POETRY_DATA_DIR=/tmp/poetry-data
+export POETRY_VIRTUALENVS_CREATE=false
+python -m pip install \
+  --disable-pip-version-check \
+  --no-compile \
+  --no-input \
+  --only-binary=:all: \
+  --target /bumpire-tools/poetry \
+  "poetry==${BUMPIRE_MANAGER_VERSION}"
+export PATH="/bumpire-tools/poetry/bin:$PATH"
+export PYTHONPATH=/bumpire-tools/poetry
+python - <<'PY'
+import json
+import os
+import subprocess
+
+targets = json.loads(os.environ.get("BUMPIRE_UPDATE_TARGETS_JSON", "[]"))
+if not isinstance(targets, list) or not targets:
+    raise SystemExit("BUMPIRE_UPDATE_TARGETS_JSON must be a non-empty array")
+
+packages = []
+for target in targets:
+    if not isinstance(target, dict) or not isinstance(target.get("package"), str):
+        raise SystemExit("each update target must contain a package string")
+    packages.append(target["package"])
+
+subprocess.run(
+    [
+        "poetry",
+        "--no-ansi",
+        "--no-interaction",
+        "--no-plugins",
+        "update",
+        *packages,
+        "--lock",
+    ],
+    check=True,
+)
+PY
+'''
+resolved_graph_script = '''
+python - <<'PY'
+import json
+import os
+import re
+import tomllib
+
+targets = json.loads(os.environ.get("BUMPIRE_TARGETS_JSON", "[]"))
+if not isinstance(targets, list) or any(not isinstance(name, str) for name in targets):
+    raise SystemExit("BUMPIRE_TARGETS_JSON must be an array of package names")
+
+with open("poetry.lock", "rb") as stream:
+    lock = tomllib.load(stream)
+locked_packages = lock.get("package")
+if not isinstance(locked_packages, list):
+    raise SystemExit("poetry.lock has no package list")
+
+normalize = lambda name: re.sub(r"[-_.]+", "-", name).lower()
+requested = {}
+for target in targets:
+    requested.setdefault(normalize(target), []).append(target)
+versions = {target: set() for target in targets}
+
+for package in locked_packages:
+    if not isinstance(package, dict):
+        continue
+    name = package.get("name")
+    version = package.get("version")
+    if not isinstance(name, str) or not isinstance(version, str) or not version:
+        continue
+    for target in requested.get(normalize(name), []):
+        versions[target].add(version)
+
+packages = {target: sorted(versions[target]) for target in targets}
+print(json.dumps({"schema_version": 1, "packages": packages}, separators=(",", ":")))
+PY
+'''
+
+[manifest_policy]
+kind = "toml-paths"
+allowed_paths = [
+  "project.dependencies",
+  "project.optional-dependencies",
+  "dependency-groups",
+  "tool.poetry.dependencies",
+  "tool.poetry.dev-dependencies",
+  "tool.poetry.group.*.dependencies",
+]
+protected_paths = ["tool.poetry.dependencies.python"]
+preserved_toml_table_key_paths = [
+  "tool.poetry.dependencies",
+  "tool.poetry.dev-dependencies",
+  "tool.poetry.group.*.dependencies",
+]
+mutable_toml_table_value_keys = ["version"]
+preserved_toml_item_pattern = '''^\s*(?P<name>[A-Za-z0-9][A-Za-z0-9._-]*)'''
+protected_toml_item_pattern = '''@|(?:git\+|https?://|file:)'''
+
+[[manager_version_sources]]
+path = "pyproject.toml"
+pattern = '^\s*requires-poetry\s*=\s*"==(?P<version>\d+\.\d+\.\d+)"\s*$'

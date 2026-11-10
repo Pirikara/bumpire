@@ -170,9 +170,30 @@ lodash@^4.17.0:
         ],
         expected_after={"idna": ["3.10"], "packaging": ["24.1"]},
     ),
+    DriverCase(
+        id="poetry-lock-v2",
+        profile="poetry",
+        files={
+            "pyproject.toml": (
+                Path(__file__).parent / "fixtures" / "poetry" / "pyproject.toml"
+            ).read_text(encoding="utf-8"),
+            "poetry.lock": (
+                Path(__file__).parent / "fixtures" / "poetry" / "poetry.lock"
+            ).read_text(encoding="utf-8"),
+        },
+        targets=["IDNA", "packaging"],
+        expected={"IDNA": ["3.9"], "packaging": ["24.0"]},
+        updates=[
+            {"package": "idna", "version": "3.10"},
+            {"package": "packaging", "version": "24.1"},
+        ],
+        expected_after={"idna": ["3.10"], "packaging": ["24.1"]},
+    ),
 ]
 
-_RESOLVER_CASES = [case for case in _CASES if case.profile in {"bun", "pnpm", "uv", "yarn"}]
+_RESOLVER_CASES = [
+    case for case in _CASES if case.profile in {"bun", "pnpm", "poetry", "uv", "yarn"}
+]
 
 
 def _write_fixture(root: Path, files: dict[str, str]) -> None:
