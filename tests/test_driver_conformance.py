@@ -209,12 +209,35 @@ lodash@^4.17.0:
         ],
         expected_after={"idna": ["3.10"], "packaging": ["24.1"]},
     ),
+    DriverCase(
+        id="pip-tools-requirements",
+        profile="pip-tools",
+        files={
+            filename: (Path(__file__).parent / "fixtures" / "pip-tools" / filename).read_text(
+                encoding="utf-8"
+            )
+            for filename in (
+                ".python-version",
+                "requirements.in",
+                "requirements.txt",
+                "requirements-dev.in",
+                "requirements-dev.txt",
+            )
+        },
+        targets=["IDNA", "packaging"],
+        expected={"IDNA": ["3.9"], "packaging": ["24.0"]},
+        updates=[
+            {"package": "idna", "version": "3.10"},
+            {"package": "packaging", "version": "24.1"},
+        ],
+        expected_after={"idna": ["3.10"], "packaging": ["24.1"]},
+    ),
 ]
 
 _RESOLVER_CASES = [
     case
     for case in _CASES
-    if case.profile in {"bun", "pdm", "pnpm", "poetry", "uv", "yarn"}
+    if case.profile in {"bun", "pdm", "pip-tools", "pnpm", "poetry", "uv", "yarn"}
 ]
 
 
@@ -269,6 +292,10 @@ def test_driver_resolver_contract(case: DriverCase, tmp_path: Path) -> None:
         for path in tmp_path.rglob("*")
         if path.is_file()
     }
+    lockfiles_before = {
+        path.relative_to(tmp_path).as_posix()
+        for path in profile.lockfile_paths(tmp_path)
+    }
 
     result = DockerRuntime(EventLogger(stream=StringIO())).run(
         ContainerCommand(
@@ -295,7 +322,14 @@ def test_driver_resolver_contract(case: DriverCase, tmp_path: Path) -> None:
         for path in set(before) | set(after)
         if before.get(path) != after.get(path)
     }
-    assert changed <= set(profile.lockfiles)
+    lockfiles_after = {
+        path.relative_to(tmp_path).as_posix()
+        for path in profile.lockfile_paths(tmp_path)
+    }
+    allowed_lockfiles = lockfiles_before | lockfiles_after
+    assert changed <= allowed_lockfiles
+    if case.profile == "pip-tools":
+        assert b"--hash=" in after["requirements-dev.txt"]
 
     if case.expected_after is not None:
         targets = list(case.expected_after)
@@ -364,3 +398,45 @@ def test_pdm_resolver_rechecks_compatibility_without_exact_override(tmp_path: Pa
     )
     assert graph.ok, graph.stderr or graph.stdout
     assert profile.parse_resolved_graph(graph.stdout, ["idna"]) != {"idna": ["2.0"]}
+
+
+@pytest.mark.driver
+@pytest.mark.skipif(
+    os.environ.get("BUMPIRE_DRIVER_CONFORMANCE") != "1",
+    reason="set BUMPIRE_DRIVER_CONFORMANCE=1 to run Docker driver contracts",
+)
+def test_pip_tools_resolver_rejects_incompatible_exact_upgrade(tmp_path: Path) -> None:
+    profile = {profile.name: profile for profile in load_builtin_profiles()}["pip-tools"]
+    fixture = Path(__file__).parent / "fixtures" / "pip-tools"
+    filenames = (
+        ".python-version",
+        "requirements.in",
+        "requirements.txt",
+        "requirements-dev.in",
+        "requirements-dev.txt",
+    )
+    _write_fixture(
+        tmp_path,
+        {
+            filename: (fixture / filename).read_text(encoding="utf-8")
+            for filename in filenames
+        },
+    )
+
+    result = DockerRuntime(EventLogger(stream=StringIO())).run(
+        ContainerCommand(
+            image=profile.image(tmp_path),
+            args=("sh", "-ceu", profile.resolve_script, "bumpire-driver"),
+            environment={
+                "BUMPIRE_MANAGER_VERSION": profile.manager_version(tmp_path),
+                "BUMPIRE_UPDATE_TARGETS_JSON": json.dumps(
+                    [{"package": "idna", "version": "2.0"}]
+                ),
+            },
+        ),
+        clone_root=tmp_path,
+        workspace=PurePosixPath("."),
+        timeout=600,
+    )
+
+    assert not result.ok

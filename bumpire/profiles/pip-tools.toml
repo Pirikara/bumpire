@@ -1,0 +1,167 @@
+name = "pip-tools"
+ecosystem = "pip-tools"
+detect_all = ["requirements.in", "requirements.txt"]
+manifest_globs = ["requirements.in", "requirements-*.in"]
+lockfiles = ["requirements.txt", "requirements-*.txt"]
+image_template = "python:{runtime_version}-slim"
+default_runtime_version = "3.12"
+default_manager_version = "7.6.2"
+instructions = """
+Edit requirements.in and requirements-*.in dependency declarations only. Preserve
+indexes, find-links entries, included requirement or constraint files, trusted-host
+settings, hashes, environment policy, and unrelated dependencies. Coordinate constraints
+across every input file when they block an exact target. Never edit compiled .txt files
+directly; pip-compile owns them. Do not add a transitive target as a new direct dependency
+merely to request its compiled version. Resolve every target to its exact requested
+version as one coherent update.
+"""
+resolve_script = '''
+mkdir -p "$HOME" /tmp/pip-cache /bumpire-tools/pip-tools
+export CUSTOM_COMPILE_COMMAND=pip-compile
+export PIP_CACHE_DIR=/tmp/pip-cache
+export PIP_CONFIG_FILE=/dev/null
+export PIP_DISABLE_PIP_VERSION_CHECK=1
+export PIP_NO_INPUT=1
+python -m pip install \
+  --disable-pip-version-check \
+  --no-compile \
+  --no-input \
+  --only-binary=:all: \
+  --target /bumpire-tools/pip-tools \
+  "pip-tools==${BUMPIRE_MANAGER_VERSION}"
+export PATH="/bumpire-tools/pip-tools/bin:$PATH"
+export PYTHONPATH=/bumpire-tools/pip-tools
+python - <<'PY'
+import json
+import os
+import re
+import subprocess
+from pathlib import Path
+
+targets = json.loads(os.environ.get("BUMPIRE_UPDATE_TARGETS_JSON", "[]"))
+if not isinstance(targets, list) or not targets:
+    raise SystemExit("BUMPIRE_UPDATE_TARGETS_JSON must be a non-empty array")
+
+upgrade_args = []
+for target in targets:
+    if (
+        not isinstance(target, dict)
+        or not isinstance(target.get("package"), str)
+        or not isinstance(target.get("version"), str)
+    ):
+        raise SystemExit("each update target must contain package and version strings")
+    upgrade_args.extend(
+        ["--upgrade-package", f"{target['package']}=={target['version']}"]
+    )
+
+sources = sorted(
+    path for path in Path(".").glob("requirements*.in") if path.is_file()
+)
+if not sources:
+    raise SystemExit("pip-tools driver found no requirements*.in inputs")
+
+source_by_path = {source: source for source in sources}
+source_by_path.update({source.with_suffix(".txt"): source for source in sources})
+include = re.compile(
+    r"^\s*(?:-c|--constraint|-r|--requirement)(?:\s+|=)(?P<path>[^\s#]+)"
+)
+dependencies = {source: set() for source in sources}
+for source in sources:
+    for line in source.read_text(encoding="utf-8").splitlines():
+        match = include.match(line)
+        if match is None:
+            continue
+        referenced = Path(os.path.normpath(source.parent / match.group("path")))
+        dependency = source_by_path.get(referenced)
+        if dependency is not None and dependency != source:
+            dependencies[source].add(dependency)
+
+ordered_sources = []
+visiting = set()
+visited = set()
+
+def visit(source):
+    if source in visiting:
+        raise SystemExit("pip-tools input files contain a dependency cycle")
+    if source in visited:
+        return
+    visiting.add(source)
+    for dependency in sorted(dependencies[source]):
+        visit(dependency)
+    visiting.remove(source)
+    visited.add(source)
+    ordered_sources.append(source)
+
+for source in sources:
+    visit(source)
+
+for source in ordered_sources:
+    output = source.with_suffix(".txt")
+    hash_args = []
+    if output.is_file() and "--hash=" in output.read_text(encoding="utf-8"):
+        hash_args.append("--generate-hashes")
+    subprocess.run(
+        [
+            "pip-compile",
+            "--output-file",
+            str(output),
+            *hash_args,
+            *upgrade_args,
+            str(source),
+        ],
+        check=True,
+    )
+PY
+'''
+resolved_graph_script = '''
+python - <<'PY'
+import json
+import os
+import re
+from pathlib import Path
+
+targets = json.loads(os.environ.get("BUMPIRE_TARGETS_JSON", "[]"))
+if not isinstance(targets, list) or any(not isinstance(name, str) for name in targets):
+    raise SystemExit("BUMPIRE_TARGETS_JSON must be an array of package names")
+
+normalize = lambda name: re.sub(r"[-_.]+", "-", name).lower()
+requested = {}
+for target in targets:
+    requested.setdefault(normalize(target), []).append(target)
+versions = {target: set() for target in targets}
+pin = re.compile(
+    r"^\s*(?P<name>[A-Za-z0-9][A-Za-z0-9._-]*)"
+    r"(?:\[[^\]]+\])?\s*==\s*(?P<version>[^\s;\\]+)"
+)
+
+sources = sorted(
+    path for path in Path(".").glob("requirements*.in") if path.is_file()
+)
+for source in sources:
+    output = source.with_suffix(".txt")
+    if not output.is_file():
+        raise SystemExit(f"compiled requirements file is missing: {output}")
+    for line in output.read_text(encoding="utf-8").splitlines():
+        match = pin.match(line)
+        if match is None:
+            continue
+        for target in requested.get(normalize(match.group("name")), []):
+            versions[target].add(match.group("version"))
+
+packages = {target: sorted(versions[target]) for target in targets}
+print(json.dumps({"schema_version": 1, "packages": packages}, separators=(",", ":")))
+PY
+'''
+
+[manifest_policy]
+kind = "changed-line-patterns"
+allowed_line_patterns = [
+  '''^\s*(?:#.*)?$''',
+  '''^\s*[A-Za-z0-9][A-Za-z0-9._-]*(?:\[[A-Za-z0-9_,.-]+\])?\s*(?:(?:===|==|~=|!=|<=|>=|<|>)\s*[^@\s].*|(?:;\s*.+)?)$''',
+]
+preserved_declaration_pattern = '''^\s*(?P<name>[A-Za-z0-9][A-Za-z0-9._-]*)'''
+forbid_new_declarations = true
+
+[[runtime_version_sources]]
+path = ".python-version"
+pattern = '^(?P<version>\d+\.\d+)(?:\.\d+)?$'

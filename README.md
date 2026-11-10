@@ -175,7 +175,7 @@ uv run bumpire publish \
 
 Use `--workspace path/to/app` for a package nested inside a monorepo. If multiple
 profiles match the same workspace, select one explicitly with `--ecosystem` followed by
-`npm`, `pnpm`, `yarn`, `bun`, `bundler`, `uv`, `poetry`, or `pdm`.
+`npm`, `pnpm`, `yarn`, `bun`, `bundler`, `uv`, `poetry`, `pdm`, or `pip-tools`.
 
 ## What gets verified
 
@@ -244,6 +244,7 @@ Python adapters.
 | uv | `pyproject.toml` + `uv.lock` | PEP 621 dependencies, dependency groups, constraints, and overrides | Exact, batched `uv lock --upgrade-package` | Official `uv workspace metadata` JSON |
 | Poetry | `pyproject.toml` + `poetry.lock` | PEP 621/735 and Poetry dependency tables | Targeted `poetry update --lock` with plugins disabled | Networkless TOML lock reader |
 | [PDM](https://pdm-project.org/) | `pyproject.toml` + `pdm.lock` | PEP 621/735, legacy dev groups, and resolution overrides | Per-target exact constraints with `pdm update --no-sync`, then an unconstrained compatibility re-lock | Networkless TOML lock reader |
+| [pip-tools](https://pip-tools.readthedocs.io/) | Root `requirements.in` / `requirements-*.in` with compiled `.txt` files | Version declarations; index, include, constraint, and source directives are protected | Layer-aware `pip-compile --upgrade-package` for every input; existing hash mode is preserved | Networkless normalized-pin reader across all compiled outputs |
 
 Bun's legacy binary `bun.lockb` is intentionally unsupported; migrate it to the current
 text-based `bun.lock` before using Bumpire. Pin pnpm, Yarn, and Bun with the
@@ -255,7 +256,10 @@ normalized-name rules. The Poetry driver likewise protects Python constraints, s
 sources, plugins, and group configuration while allowing dependency entries inside any
 named Poetry group. The PDM driver protects the same project-controlled surfaces, skips
 all hooks, routes each target through its declared or locked group, and removes temporary
-exact constraints before the final compatibility resolution.
+exact constraints before the final compatibility resolution. The pip-tools driver orders
+layered inputs before their dependants, supports multiple compiled outputs atomically,
+rejects new direct dependency declarations, and requires every occurrence of a target
+pin to reach the requested version.
 
 A driver profile defines:
 
@@ -318,6 +322,7 @@ Bundler then resolves `activestorage` and the other Rails components to `7.2.3.2
 - uv performs lockfile resolution only; it does not sync or install the project environment.
 - Poetry updates the lockfile only and disables project plugins; it does not install project dependencies.
 - PDM updates the lockfile with syncing and hooks disabled; it does not install project dependencies.
+- pip-tools compiles lockfiles only; it never runs `pip-sync` or installs project dependencies.
 - The agent cannot choose the image, shell command, lockfile, or success condition.
 - Staged, unstaged, and untracked files are all checked against an allowlist.
 - The original repository is never modified.

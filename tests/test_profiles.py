@@ -19,6 +19,7 @@ def test_builtin_profiles_are_declarative_and_complete() -> None:
         "bundler",
         "npm",
         "pdm",
+        "pip-tools",
         "pnpm",
         "poetry",
         "uv",
@@ -36,6 +37,8 @@ def test_builtin_profiles_are_declarative_and_complete() -> None:
     assert 'open("poetry.lock"' in profiles["poetry"].resolved_graph_script
     assert 'open("pdm.lock"' in profiles["pdm"].resolved_graph_script
     assert '"update"' in profiles["pdm"].resolve_script
+    assert '"pip-compile"' in profiles["pip-tools"].resolve_script
+    assert "requirements*.in" in profiles["pip-tools"].resolved_graph_script
     assert "uv workspace metadata" in profiles["uv"].resolved_graph_script
 
 
@@ -202,6 +205,25 @@ def test_pdm_profile_detects_lockfile_and_uses_pinned_default(tmp_path: Path) ->
     assert profile.name == "pdm"
     assert profile.manager_version(tmp_path) == "2.29.7"
     assert profile.image(tmp_path) == "python:3.12-slim"
+
+
+def test_pip_tools_profile_detects_runtime_and_multiple_lockfiles(tmp_path: Path) -> None:
+    (tmp_path / "requirements.in").write_text("requests>=2\n", encoding="utf-8")
+    (tmp_path / "requirements-dev.in").write_text("pytest>=8\n", encoding="utf-8")
+    (tmp_path / "requirements.txt").write_text("requests==2.32.3\n", encoding="utf-8")
+    (tmp_path / "requirements-dev.txt").write_text("pytest==8.4.0\n", encoding="utf-8")
+    (tmp_path / ".python-version").write_text("3.13.2\n", encoding="utf-8")
+
+    profile = detect_profile(tmp_path, ".")
+
+    assert profile.name == "pip-tools"
+    assert profile.runtime_version(tmp_path) == "3.13"
+    assert profile.manager_version(tmp_path) == "7.6.2"
+    assert profile.image(tmp_path) == "python:3.13-slim"
+    assert [path.name for path in profile.lockfile_paths(tmp_path)] == [
+        "requirements-dev.txt",
+        "requirements.txt",
+    ]
 
 
 def test_driver_protocol_normalizes_resolved_versions() -> None:
@@ -562,6 +584,45 @@ url = "https://pypi.org/simple"
                 'urllib3 = "2.6.0"',
                 'urllib3 = { version = "2.6.0", url = "https://example.invalid/pkg.whl" }',
             ),
+        )
+
+
+def test_pip_tools_manifest_policy_allows_versions_but_protects_sources() -> None:
+    profile = _profiles_by_name()["pip-tools"]
+    original = """--index-url https://pypi.org/simple
+-r base.in
+
+Django==5.1.1
+idna>=3.9
+packaging
+"""
+    dependency_update = original.replace("Django==5.1.1", "Django==5.2.1")
+    dependency_update = dependency_update.replace("packaging\n", "packaging==24.1\n")
+
+    profile.validate_manifest_replacement(original, dependency_update)
+
+    with pytest.raises(ValueError, match="outside the profile policy"):
+        profile.validate_manifest_replacement(
+            original,
+            dependency_update.replace("https://pypi.org/simple", "https://example.invalid/simple"),
+        )
+    with pytest.raises(ValueError, match="outside the profile policy"):
+        profile.validate_manifest_replacement(
+            original,
+            dependency_update.replace(
+                "idna>=3.9",
+                "idna @ https://example.invalid/idna.whl",
+            ),
+        )
+    with pytest.raises(ValueError, match="declarations may not be removed"):
+        profile.validate_manifest_replacement(
+            original,
+            dependency_update.replace("idna>=3.9\n", ""),
+        )
+    with pytest.raises(ValueError, match="declarations may not be added"):
+        profile.validate_manifest_replacement(
+            original,
+            dependency_update.replace("packaging==24.1\n", "packaging==24.1\nurllib3<3\n"),
         )
 
 

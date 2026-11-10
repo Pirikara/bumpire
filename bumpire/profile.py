@@ -47,6 +47,7 @@ class ManifestPolicy(BaseModel):
     preserved_toml_table_key_paths: list[str] = Field(default_factory=list)
     mutable_toml_table_value_keys: list[str] = Field(default_factory=list)
     preserved_declaration_pattern: str | None = None
+    forbid_new_declarations: bool = False
     preserved_toml_item_pattern: str | None = None
     protected_toml_item_pattern: str | None = None
 
@@ -74,6 +75,10 @@ class ManifestPolicy(BaseModel):
             compiled = re.compile(self.preserved_declaration_pattern)
             if "name" not in compiled.groupindex:
                 raise ValueError("preserved_declaration_pattern requires a named 'name' group")
+        elif self.forbid_new_declarations:
+            raise ValueError(
+                "forbid_new_declarations requires preserved_declaration_pattern"
+            )
         if self.preserved_toml_item_pattern is not None:
             compiled = re.compile(self.preserved_toml_item_pattern)
             if "name" not in compiled.groupindex:
@@ -168,8 +173,15 @@ class PackageManagerProfile(BaseModel):
         return all((workdir / path).is_file() for path in self.detect_all)
 
     def manifest_paths(self, workdir: Path) -> list[Path]:
+        return self._matching_files(workdir, self.manifest_globs)
+
+    def lockfile_paths(self, workdir: Path) -> list[Path]:
+        return self._matching_files(workdir, self.lockfiles)
+
+    @staticmethod
+    def _matching_files(workdir: Path, patterns: list[str]) -> list[Path]:
         paths: set[Path] = set()
-        for pattern in self.manifest_globs:
+        for pattern in patterns:
             for path in workdir.glob(pattern):
                 if not path.is_file():
                     continue
@@ -263,6 +275,10 @@ class PackageManagerProfile(BaseModel):
         removed = sorted(before - after)
         if removed:
             raise ValueError(f"dependency declarations may not be removed: {removed}")
+        if self.manifest_policy.forbid_new_declarations:
+            added = sorted(after - before)
+            if added:
+                raise ValueError(f"dependency declarations may not be added: {added}")
 
     def _validate_json_sections(self, original: str, replacement: str) -> None:
         try:
