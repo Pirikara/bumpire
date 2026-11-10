@@ -175,7 +175,7 @@ uv run bumpire publish \
 
 Use `--workspace path/to/app` for a package nested inside a monorepo. If multiple
 profiles match the same workspace, select one explicitly with `--ecosystem` followed by
-`npm`, `pnpm`, `yarn`, `bun`, `bundler`, or `uv`.
+`npm`, `pnpm`, `yarn`, `bun`, `bundler`, `uv`, or `poetry`.
 
 ## What gets verified
 
@@ -242,6 +242,7 @@ Python adapters.
 | Bun | `package.json` + `bun.lock` | Dependency-related JSON sections | `bun install --lockfile-only --ignore-scripts` | Bun's native JSONC reader |
 | Bundler | `Gemfile` + `Gemfile.lock` | `gem` declaration lines | `bundle lock` | `Bundler::LockfileParser` |
 | uv | `pyproject.toml` + `uv.lock` | PEP 621 dependencies, dependency groups, constraints, and overrides | Exact, batched `uv lock --upgrade-package` | Official `uv workspace metadata` JSON |
+| Poetry | `pyproject.toml` + `poetry.lock` | PEP 621/735 and Poetry dependency tables | Targeted `poetry update --lock` with plugins disabled | Networkless TOML lock reader |
 
 Bun's legacy binary `bun.lockb` is intentionally unsupported; migrate it to the current
 text-based `bun.lock` before using Bumpire. Pin pnpm, Yarn, and Bun with the
@@ -249,7 +250,9 @@ text-based `bun.lock` before using Bumpire. Pin pnpm, Yarn, and Bun with the
 that load custom plugins from `.yarnrc.yml` are rejected because those plugins execute
 repository-controlled code inside the resolver. The uv driver protects project scripts,
 build settings, indexes, and source mappings; package names are matched using Python's
-normalized-name rules.
+normalized-name rules. The Poetry driver likewise protects Python constraints, scripts,
+sources, plugins, and group configuration while allowing dependency entries inside any
+named Poetry group.
 
 A driver profile defines:
 
@@ -310,6 +313,7 @@ Bundler then resolves `activestorage` and the other Rails components to `7.2.3.2
 - `.git` is mounted read-only inside the container.
 - npm, pnpm, Yarn, and Bun lifecycle scripts are disabled during lockfile resolution.
 - uv performs lockfile resolution only; it does not sync or install the project environment.
+- Poetry updates the lockfile only and disables project plugins; it does not install project dependencies.
 - The agent cannot choose the image, shell command, lockfile, or success condition.
 - Staged, unstaged, and untracked files are all checked against an allowlist.
 - The original repository is never modified.
@@ -349,8 +353,8 @@ uv build
 ```
 
 The driver conformance suite executes each trusted graph reader in a networkless,
-read-only Docker mount and exercises each JavaScript resolver in a writable disposable
-workspace. CI runs it as a separate required job.
+read-only Docker mount and exercises each resolver in a writable disposable workspace.
+CI runs it as a separate required job.
 
 ## License
 

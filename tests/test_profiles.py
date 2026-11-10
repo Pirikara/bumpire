@@ -14,15 +14,17 @@ def _profiles_by_name():
 def test_builtin_profiles_are_declarative_and_complete() -> None:
     profiles = _profiles_by_name()
 
-    assert set(profiles) == {"bun", "bundler", "npm", "pnpm", "uv", "yarn"}
+    assert set(profiles) == {"bun", "bundler", "npm", "pnpm", "poetry", "uv", "yarn"}
     assert "npm install --package-lock-only" in profiles["npm"].resolve_script
     assert "pnpm install --lockfile-only" in profiles["pnpm"].resolve_script
     assert "yarn install" in profiles["yarn"].resolve_script
     assert "bun install --lockfile-only" in profiles["bun"].resolve_script
     assert "bundle lock" in profiles["bundler"].resolve_script
+    assert '"update"' in profiles["poetry"].resolve_script
     assert '"uv", "lock"' in profiles["uv"].resolve_script
     assert "JSON.stringify" in profiles["npm"].resolved_graph_script
     assert "Bundler::LockfileParser" in profiles["bundler"].resolved_graph_script
+    assert 'open("poetry.lock"' in profiles["poetry"].resolved_graph_script
     assert "uv workspace metadata" in profiles["uv"].resolved_graph_script
 
 
@@ -152,6 +154,26 @@ def test_uv_profile_extracts_versions_and_discovers_workspace_manifests(
         "packages/member/pyproject.toml",
         "pyproject.toml",
     ]
+
+
+def test_poetry_profile_detects_exact_required_version(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        """[project]
+name = "example"
+version = "0.1.0"
+
+[tool.poetry]
+requires-poetry = "==2.5.1"
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "poetry.lock").write_text("package = []\n", encoding="utf-8")
+
+    profile = detect_profile(tmp_path, ".")
+
+    assert profile.name == "poetry"
+    assert profile.manager_version(tmp_path) == "2.5.1"
+    assert profile.image(tmp_path) == "python:3.12-slim"
 
 
 def test_driver_protocol_normalizes_resolved_versions() -> None:
@@ -310,6 +332,128 @@ url = "https://pypi.org/simple"
         profile.validate_manifest_replacement(
             original,
             dependency_update.replace(', { include-group = "lint" }', ""),
+        )
+    with pytest.raises(ValueError, match="source declarations may not change"):
+        profile.validate_manifest_replacement(
+            original,
+            dependency_update.replace(
+                '"idna>=3.9"',
+                '"idna @ https://example.invalid/idna.whl"',
+            ),
+        )
+
+
+def test_poetry_manifest_policy_supports_dependency_tables_and_protects_config() -> None:
+    profile = _profiles_by_name()["poetry"]
+    original = """[project]
+name = "example"
+dependencies = ["Django==5.1.1", "idna>=3.9"]
+
+[project.scripts]
+example = "example:main"
+
+[tool.poetry.dependencies]
+python = ">=3.12"
+requests = "^2.31"
+
+[tool.poetry.group.dev]
+optional = true
+
+[tool.poetry.group.dev.dependencies]
+pytest = "8.3.0"
+
+[[tool.poetry.source]]
+name = "pypi"
+priority = "primary"
+"""
+    dependency_update = """[project]
+name = "example"
+dependencies = ["Django==5.2.1", "idna>=3.9"]
+
+[project.scripts]
+example = "example:main"
+
+[tool.poetry.dependencies]
+python = ">=3.12"
+requests = "^2.32"
+urllib3 = "2.6.0"
+
+[tool.poetry.group.dev]
+optional = true
+
+[tool.poetry.group.dev.dependencies]
+pytest = "8.4.0"
+
+[[tool.poetry.source]]
+name = "pypi"
+priority = "primary"
+"""
+
+    profile.validate_manifest_replacement(original, dependency_update)
+
+    protected_replacements = [
+        dependency_update.replace('example = "example:main"', 'example = "other:main"'),
+        dependency_update.replace('python = ">=3.12"', 'python = ">=3.13"'),
+        dependency_update.replace("priority = \"primary\"", "priority = \"supplemental\""),
+        dependency_update.replace("optional = true", "optional = false"),
+    ]
+    for replacement in protected_replacements:
+        with pytest.raises(ValueError, match="protected TOML field"):
+            profile.validate_manifest_replacement(original, replacement)
+
+    with pytest.raises(ValueError, match="declarations may not be removed"):
+        profile.validate_manifest_replacement(
+            original,
+            dependency_update.replace('requests = "^2.32"\n', ""),
+        )
+    with pytest.raises(ValueError, match="declarations may not be removed"):
+        profile.validate_manifest_replacement(
+            original,
+            dependency_update.replace('pytest = "8.4.0"\n', ""),
+        )
+    with pytest.raises(ValueError, match="declarations may not be removed"):
+        profile.validate_manifest_replacement(
+            original,
+            dependency_update.replace(', "idna>=3.9"', ""),
+        )
+    with pytest.raises(ValueError, match="source or selector fields may not change"):
+        profile.validate_manifest_replacement(
+            original,
+            dependency_update.replace(
+                'requests = "^2.32"',
+                'requests = { version = "^2.32", source = "private" }',
+            ),
+        )
+    with pytest.raises(ValueError, match="registry version constraint"):
+        profile.validate_manifest_replacement(
+            original,
+            dependency_update.replace(
+                'urllib3 = "2.6.0"',
+                'urllib3 = { git = "https://example.invalid/urllib3.git" }',
+            ),
+        )
+    with pytest.raises(ValueError, match="source declarations may not change"):
+        profile.validate_manifest_replacement(
+            original,
+            dependency_update.replace(
+                '"idna>=3.9"',
+                '"idna @ https://example.invalid/idna.whl"',
+            ),
+        )
+
+    private_original = original.replace(
+        'requests = "^2.31"',
+        'requests = { version = "^2.31", source = "private" }',
+    )
+    private_update = dependency_update.replace(
+        'requests = "^2.32"',
+        'requests = { version = "^2.32", source = "private" }',
+    )
+    profile.validate_manifest_replacement(private_original, private_update)
+    with pytest.raises(ValueError, match="source or selector fields may not change"):
+        profile.validate_manifest_replacement(
+            private_original,
+            private_update.replace('source = "private"', 'source = "other"'),
         )
 
 

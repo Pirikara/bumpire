@@ -90,6 +90,7 @@ allowed_paths = [
   "tool.uv.override-dependencies",
 ]
 preserved_toml_item_pattern = '''^\s*(?P<name>[A-Za-z0-9][A-Za-z0-9._-]*)'''
+protected_toml_item_pattern = '''@|(?:git\+|https?://|file:)'''
 
 [[runtime_version_sources]]
 path = ".python-version"

@@ -7,7 +7,6 @@ import json
 import re
 import tomllib
 from collections import Counter
-from copy import deepcopy
 from pathlib import Path, PurePosixPath
 from typing import Literal
 
@@ -44,8 +43,12 @@ class ManifestPolicy(BaseModel):
     allowed_sections: list[str] = Field(default_factory=list)
     allowed_line_patterns: list[str] = Field(default_factory=list)
     allowed_paths: list[str] = Field(default_factory=list)
+    protected_paths: list[str] = Field(default_factory=list)
+    preserved_toml_table_key_paths: list[str] = Field(default_factory=list)
+    mutable_toml_table_value_keys: list[str] = Field(default_factory=list)
     preserved_declaration_pattern: str | None = None
     preserved_toml_item_pattern: str | None = None
+    protected_toml_item_pattern: str | None = None
 
     @model_validator(mode="after")
     def required_rules(self) -> ManifestPolicy:
@@ -57,9 +60,13 @@ class ManifestPolicy(BaseModel):
             raise ValueError("toml-paths policy requires allowed_paths")
         for pattern in self.allowed_line_patterns:
             re.compile(pattern)
-        for path in self.allowed_paths:
+        for path in [
+            *self.allowed_paths,
+            *self.protected_paths,
+            *self.preserved_toml_table_key_paths,
+        ]:
             if not path or any(
-                not re.fullmatch(r"[A-Za-z0-9_-]+", component)
+                not re.fullmatch(r"(?:[A-Za-z0-9_-]+|\*)", component)
                 for component in path.split(".")
             ):
                 raise ValueError(f"unsafe TOML policy path: {path!r}")
@@ -71,6 +78,11 @@ class ManifestPolicy(BaseModel):
             compiled = re.compile(self.preserved_toml_item_pattern)
             if "name" not in compiled.groupindex:
                 raise ValueError("preserved_toml_item_pattern requires a named 'name' group")
+        if self.protected_toml_item_pattern is not None:
+            re.compile(self.protected_toml_item_pattern)
+        for key in self.mutable_toml_table_value_keys:
+            if not re.fullmatch(r"[A-Za-z0-9_-]+", key):
+                raise ValueError(f"unsafe mutable TOML table key: {key!r}")
         return self
 
 
@@ -292,41 +304,118 @@ class PackageManagerProfile(BaseModel):
 
         missing = object()
         pattern = self.manifest_policy.preserved_toml_item_pattern
-        for dotted_path in self.manifest_policy.allowed_paths:
-            path = dotted_path.split(".")
-            previous = self._nested_value(before, path, missing)
-            proposed = self._nested_value(after, path, missing)
-            if previous is not missing and proposed is missing:
-                raise ValueError(f"TOML dependency path may not be removed: {dotted_path}")
-            if proposed is not missing and not isinstance(proposed, (dict, list)):
-                raise ValueError(
-                    f"TOML dependency path must remain a table or array: {dotted_path}"
-                )
-            if pattern is not None and previous is not missing:
-                before_items = self._toml_dependency_items(previous, pattern)
-                after_items = (
-                    Counter()
-                    if proposed is missing
-                    else self._toml_dependency_items(proposed, pattern)
-                )
-                removed = list((before_items - after_items).elements())
-                if removed:
+        protected_item_pattern = self.manifest_policy.protected_toml_item_pattern
+        table_key_patterns = [
+            path.split(".")
+            for path in self.manifest_policy.preserved_toml_table_key_paths
+        ]
+        for dotted_pattern in self.manifest_policy.allowed_paths:
+            path_pattern = dotted_pattern.split(".")
+            before_paths = self._matching_toml_paths(before, path_pattern)
+            after_paths = self._matching_toml_paths(after, path_pattern)
+            for path in before_paths:
+                previous = self._nested_value(before, path, missing)
+                proposed = self._nested_value(after, path, missing)
+                if proposed is missing:
                     raise ValueError(
-                        f"dependency declarations may not be removed from {dotted_path}: "
-                        f"{removed[:3]}"
+                        f"TOML dependency path may not be removed: {'.'.join(path)}"
+                    )
+                preserves_table_keys = any(
+                    len(path) == len(table_pattern)
+                    and self._toml_path_within_pattern(path, table_pattern)
+                    for table_pattern in table_key_patterns
+                )
+                if pattern is not None and not preserves_table_keys:
+                    before_items = self._toml_dependency_items(previous, pattern)
+                    after_items = self._toml_dependency_items(proposed, pattern)
+                    removed = list((before_items - after_items).elements())
+                    if removed:
+                        raise ValueError(
+                            "dependency declarations may not be removed from "
+                            f"{'.'.join(path)}: {removed[:3]}"
+                        )
+                if protected_item_pattern is not None and not preserves_table_keys:
+                    before_items = self._matching_toml_strings(
+                        previous, protected_item_pattern
+                    )
+                    after_items = self._matching_toml_strings(
+                        proposed, protected_item_pattern
+                    )
+                    if before_items != after_items:
+                        raise ValueError(
+                            "dependency source declarations may not change in "
+                            f"{'.'.join(path)}"
+                        )
+            for path in before_paths | after_paths:
+                proposed = self._nested_value(after, path, missing)
+                if proposed is not missing and not isinstance(proposed, (dict, list)):
+                    raise ValueError(
+                        "TOML dependency path must remain a table or array: "
+                        f"{'.'.join(path)}"
                     )
 
-        protected_before = deepcopy(before)
-        protected_after = deepcopy(after)
-        for dotted_path in self.manifest_policy.allowed_paths:
-            path = dotted_path.split(".")
-            self._remove_nested_path(protected_before, path)
-            self._remove_nested_path(protected_after, path)
-        if protected_before != protected_after:
-            raise ValueError("manifest replacement changes protected TOML fields")
+        for dotted_pattern in self.manifest_policy.preserved_toml_table_key_paths:
+            path_pattern = dotted_pattern.split(".")
+            for path in self._matching_toml_paths(before, path_pattern):
+                previous = self._nested_value(before, path, missing)
+                proposed = self._nested_value(after, path, missing)
+                if not isinstance(previous, dict) or not isinstance(proposed, dict):
+                    raise ValueError(
+                        f"TOML dependency table may not be removed: {'.'.join(path)}"
+                    )
+                removed = sorted(set(previous) - set(proposed))
+                if removed:
+                    raise ValueError(
+                        "dependency declarations may not be removed from "
+                        f"{'.'.join(path)}: {removed[:3]}"
+                    )
+                mutable_keys = set(self.manifest_policy.mutable_toml_table_value_keys)
+                for dependency in sorted(set(previous) & set(proposed)):
+                    before_shape = self._protected_toml_value(
+                        previous[dependency], mutable_keys
+                    )
+                    after_shape = self._protected_toml_value(
+                        proposed[dependency], mutable_keys
+                    )
+                    if before_shape != after_shape:
+                        raise ValueError(
+                            "dependency source or selector fields may not change for "
+                            f"{dependency} in {'.'.join(path)}"
+                        )
+                for dependency in sorted(set(proposed) - set(previous)):
+                    if self._protected_toml_value(proposed[dependency], mutable_keys) is not None:
+                        raise ValueError(
+                            "new dependency must use a registry version constraint: "
+                            f"{dependency} in {'.'.join(path)}"
+                        )
+
+        for dotted_pattern in self.manifest_policy.protected_paths:
+            path_pattern = dotted_pattern.split(".")
+            candidate_paths = self._matching_toml_paths(before, path_pattern)
+            candidate_paths.update(self._matching_toml_paths(after, path_pattern))
+            if "*" not in path_pattern:
+                candidate_paths.add(tuple(path_pattern))
+            for path in candidate_paths:
+                if self._nested_value(before, path, missing) != self._nested_value(
+                    after, path, missing
+                ):
+                    raise ValueError(
+                        f"manifest replacement changes protected TOML field: {'.'.join(path)}"
+                    )
+
+        changed = self._changed_toml_paths(
+            before,
+            after,
+            allowed=[path.split(".") for path in self.manifest_policy.allowed_paths],
+        )
+        if changed:
+            rendered = [".".join(path) or "<root>" for path in changed[:3]]
+            raise ValueError(f"manifest replacement changes protected TOML fields: {rendered}")
 
     @staticmethod
-    def _nested_value(document: dict[str, object], path: list[str], missing: object) -> object:
+    def _nested_value(
+        document: dict[str, object], path: list[str] | tuple[str, ...], missing: object
+    ) -> object:
         current: object = document
         for component in path:
             if not isinstance(current, dict) or component not in current:
@@ -335,21 +424,68 @@ class PackageManagerProfile(BaseModel):
         return current
 
     @classmethod
-    def _remove_nested_path(cls, document: dict[str, object], path: list[str]) -> None:
-        if not path:
-            return
-        component = path[0]
-        if component not in document:
-            return
-        if len(path) == 1:
-            del document[component]
-            return
-        child = document[component]
-        if not isinstance(child, dict):
-            return
-        cls._remove_nested_path(child, path[1:])
-        if not child:
-            del document[component]
+    def _matching_toml_paths(
+        cls,
+        document: dict[str, object],
+        pattern: list[str],
+    ) -> set[tuple[str, ...]]:
+        matches: set[tuple[str, ...]] = set()
+
+        def walk(current: object, index: int, path: tuple[str, ...]) -> None:
+            if index == len(pattern):
+                matches.add(path)
+                return
+            if not isinstance(current, dict):
+                return
+            component = pattern[index]
+            if component == "*":
+                for key, value in current.items():
+                    walk(value, index + 1, (*path, key))
+            elif component in current:
+                walk(current[component], index + 1, (*path, component))
+
+        walk(document, 0, ())
+        return matches
+
+    @classmethod
+    def _changed_toml_paths(
+        cls,
+        before: object,
+        after: object,
+        *,
+        allowed: list[list[str]],
+        path: tuple[str, ...] = (),
+    ) -> list[tuple[str, ...]]:
+        if before == after:
+            return []
+        if any(cls._toml_path_within_pattern(path, pattern) for pattern in allowed):
+            return []
+        if isinstance(before, dict) or isinstance(after, dict):
+            if before is not None and not isinstance(before, dict):
+                return [path]
+            if after is not None and not isinstance(after, dict):
+                return [path]
+            before_table = before if isinstance(before, dict) else {}
+            after_table = after if isinstance(after, dict) else {}
+            changes: list[tuple[str, ...]] = []
+            for key in sorted(set(before_table) | set(after_table)):
+                changes.extend(
+                    cls._changed_toml_paths(
+                        before_table.get(key),
+                        after_table.get(key),
+                        allowed=allowed,
+                        path=(*path, key),
+                    )
+                )
+            return changes
+        return [path]
+
+    @staticmethod
+    def _toml_path_within_pattern(path: tuple[str, ...], pattern: list[str]) -> bool:
+        return len(path) >= len(pattern) and all(
+            expected == "*" or expected == actual
+            for actual, expected in zip(path, pattern, strict=False)
+        )
 
     @staticmethod
     def _toml_dependency_items(value: object, pattern: str) -> Counter[str]:
@@ -376,6 +512,46 @@ class PackageManagerProfile(BaseModel):
 
         collect(value)
         return items
+
+    @staticmethod
+    def _matching_toml_strings(value: object, pattern: str) -> Counter[str]:
+        matches: Counter[str] = Counter()
+        compiled = re.compile(pattern)
+
+        def collect(candidate: object) -> None:
+            if isinstance(candidate, str):
+                if compiled.search(candidate):
+                    matches[candidate] += 1
+                return
+            if isinstance(candidate, list):
+                for item in candidate:
+                    collect(item)
+                return
+            if isinstance(candidate, dict):
+                for item in candidate.values():
+                    collect(item)
+
+        collect(value)
+        return matches
+
+    @classmethod
+    def _protected_toml_value(
+        cls,
+        value: object,
+        mutable_keys: set[str],
+    ) -> object:
+        if isinstance(value, str):
+            return None
+        if isinstance(value, list):
+            return tuple(cls._protected_toml_value(item, mutable_keys) for item in value)
+        if isinstance(value, dict):
+            protected = {
+                key: item
+                for key, item in value.items()
+                if key not in mutable_keys
+            }
+            return protected or None
+        return value
 
     @staticmethod
     def _extract_version(
