@@ -14,11 +14,53 @@ def _profiles_by_name():
 def test_builtin_profiles_are_declarative_and_complete() -> None:
     profiles = _profiles_by_name()
 
-    assert set(profiles) == {"bundler", "npm"}
+    assert set(profiles) == {"bun", "bundler", "npm", "pnpm", "yarn"}
     assert "npm install --package-lock-only" in profiles["npm"].resolve_script
+    assert "pnpm install --lockfile-only" in profiles["pnpm"].resolve_script
+    assert "yarn install" in profiles["yarn"].resolve_script
+    assert "bun install --lockfile-only" in profiles["bun"].resolve_script
     assert "bundle lock" in profiles["bundler"].resolve_script
     assert "JSON.stringify" in profiles["npm"].resolved_graph_script
     assert "Bundler::LockfileParser" in profiles["bundler"].resolved_graph_script
+
+
+@pytest.mark.parametrize(
+    ("manager", "lockfile", "version", "expected_image"),
+    [
+        ("pnpm", "pnpm-lock.yaml", "12.14.0", "node:22-bookworm-slim"),
+        ("yarn", "yarn.lock", "4.10.3", "node:22-bookworm-slim"),
+        ("bun", "bun.lock", "1.4.4", "oven/bun:1.4.4-slim"),
+    ],
+)
+def test_javascript_driver_detection_and_image_selection(
+    tmp_path: Path,
+    manager: str,
+    lockfile: str,
+    version: str,
+    expected_image: str,
+) -> None:
+    (tmp_path / "package.json").write_text(
+        json.dumps({"packageManager": f"{manager}@{version}"}),
+        encoding="utf-8",
+    )
+    (tmp_path / lockfile).write_text("{}\n", encoding="utf-8")
+
+    profile = detect_profile(tmp_path, ".")
+
+    assert profile.name == manager
+    assert profile.manager_version(tmp_path) == version
+    assert profile.image(tmp_path) == expected_image
+
+
+def test_yarn_driver_rejects_repository_controlled_plugins(tmp_path: Path) -> None:
+    profile = _profiles_by_name()["yarn"]
+    (tmp_path / ".yarnrc.yml").write_text(
+        "plugins:\n  - path: ./malicious-plugin.cjs\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="custom Yarn plugins"):
+        profile.validate_workspace(tmp_path)
 
 
 def test_npm_profile_detects_versions_manifests_and_locked_target(tmp_path: Path) -> None:
@@ -121,8 +163,11 @@ def test_explicit_ecosystem_disambiguates_mixed_workspace(tmp_path: Path) -> Non
     assert detect_profile(tmp_path, ".", "bundler").name == "bundler"
 
 
-def test_npm_manifest_policy_allows_dependencies_but_protects_scripts() -> None:
-    profile = _profiles_by_name()["npm"]
+@pytest.mark.parametrize("profile_name", ["bun", "npm", "pnpm", "yarn"])
+def test_javascript_manifest_policy_allows_dependencies_but_protects_scripts(
+    profile_name: str,
+) -> None:
+    profile = _profiles_by_name()[profile_name]
     original = json.dumps({"scripts": {"test": "pytest"}, "dependencies": {"lodash": "4.17.20"}})
     dependency_update = json.dumps(
         {"scripts": {"test": "pytest"}, "dependencies": {"lodash": "4.18.1"}}
@@ -139,8 +184,11 @@ def test_npm_manifest_policy_allows_dependencies_but_protects_scripts() -> None:
         profile.validate_manifest_replacement(original, dependency_removal)
 
 
-def test_npm_manifest_policy_rejects_new_protected_null_field() -> None:
-    profile = _profiles_by_name()["npm"]
+@pytest.mark.parametrize("profile_name", ["bun", "npm", "pnpm", "yarn"])
+def test_javascript_manifest_policy_rejects_new_protected_null_field(
+    profile_name: str,
+) -> None:
+    profile = _profiles_by_name()[profile_name]
 
     with pytest.raises(ValueError, match="protected JSON fields"):
         profile.validate_manifest_replacement(

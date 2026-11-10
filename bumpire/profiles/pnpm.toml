@@ -1,0 +1,85 @@
+name = "pnpm"
+ecosystem = "pnpm"
+detect_all = ["package.json", "pnpm-lock.yaml"]
+manifest_globs = ["package.json", "**/package.json"]
+lockfiles = ["pnpm-lock.yaml"]
+image_template = "node:{runtime_version}-bookworm-slim"
+default_runtime_version = "22"
+default_manager_version = "12.14.0"
+instructions = """
+Edit package.json dependency fields only. Preserve unrelated metadata and formatting as
+closely as possible. Coordinate root, workspace, and peerDependencies constraints when
+they block an exact target. Never edit pnpm-lock.yaml directly; the
+resolver owns it. Resolve every target to its exact requested version atomically.
+"""
+resolve_script = '''
+mkdir -p "$HOME" /tmp/npm-cache /bumpire-tools/pnpm
+export npm_config_cache=/tmp/npm-cache
+export npm_config_update_notifier=false
+npm install --global --prefix /bumpire-tools/pnpm "pnpm@${BUMPIRE_MANAGER_VERSION}" --ignore-scripts --no-audit --no-fund
+/bumpire-tools/pnpm/bin/pnpm install --lockfile-only --ignore-scripts --ignore-pnpmfile --no-frozen-lockfile --store-dir /tmp/pnpm-store
+'''
+resolved_graph_script = '''
+node <<'NODE'
+const fs = require("fs");
+
+const targets = JSON.parse(process.env.BUMPIRE_TARGETS_JSON || "[]");
+if (!Array.isArray(targets) || targets.some((name) => typeof name !== "string")) {
+  throw new Error("BUMPIRE_TARGETS_JSON must be an array of package names");
+}
+const versions = Object.fromEntries(targets.map((name) => [name, new Set()]));
+const text = fs.readFileSync("pnpm-lock.yaml", "utf8");
+const lockfileVersion = text.match(/^lockfileVersion:\s*['"]?([^'"\s]+)['"]?\s*$/m)?.[1];
+if (!lockfileVersion) throw new Error("pnpm lockfile has no lockfileVersion");
+
+let section = "";
+for (const line of text.split(/\r?\n/)) {
+  const topLevel = line.match(/^([A-Za-z][A-Za-z0-9_-]*):\s*$/);
+  if (topLevel) {
+    section = topLevel[1];
+    continue;
+  }
+  if (section !== "packages" && section !== "snapshots") continue;
+  const entry = line.match(/^  (.+?):(?:\s+\{\})?\s*$/);
+  if (!entry) continue;
+  let key = entry[1].trim();
+  if ((key.startsWith('"') && key.endsWith('"')) ||
+      (key.startsWith("'") && key.endsWith("'"))) {
+    key = key.slice(1, -1);
+  }
+  key = key.replace(/^\//, "").replace(/(?:\([^)]*\))+$/, "");
+
+  let separator = key.lastIndexOf("@");
+  if (separator <= 0) {
+    separator = key.lastIndexOf("/");
+  }
+  if (separator <= 0) continue;
+  const name = key.slice(0, separator);
+  const version = key.slice(separator + 1).split("_", 1)[0];
+  if (Object.hasOwn(versions, name) && version) versions[name].add(version);
+}
+
+const packages = Object.fromEntries(
+  targets.map((name) => [name, [...versions[name]].sort()]),
+);
+process.stdout.write(JSON.stringify({schema_version: 1, packages}));
+NODE
+'''
+
+[manifest_policy]
+kind = "json-sections"
+allowed_sections = [
+  "dependencies",
+  "devDependencies",
+  "optionalDependencies",
+  "peerDependencies",
+  "peerDependenciesMeta",
+]
+
+[[runtime_version_sources]]
+path = "package.json"
+pattern = '"node"\s*:\s*"(?P<version>\d+\.\d+\.\d+)"'
+
+[[manager_version_sources]]
+path = "package.json"
+pattern = '"packageManager"\s*:\s*"pnpm@(?P<version>\d+\.\d+\.\d+)'

@@ -17,6 +17,26 @@ class VersionSource(BaseModel):
     pattern: str
 
 
+class RejectedContent(BaseModel):
+    path: str
+    pattern: str
+    reason: str
+
+    @field_validator("path")
+    @classmethod
+    def safe_path(cls, value: str) -> str:
+        path = PurePosixPath(value)
+        if path.is_absolute() or ".." in path.parts or "\x00" in value:
+            raise ValueError(f"unsafe rejected-content path: {value!r}")
+        return value
+
+    @field_validator("pattern")
+    @classmethod
+    def valid_pattern(cls, value: str) -> str:
+        re.compile(value)
+        return value
+
+
 class ManifestPolicy(BaseModel):
     kind: Literal["json-sections", "changed-line-patterns"]
     allowed_sections: list[str] = Field(default_factory=list)
@@ -89,6 +109,7 @@ class PackageManagerProfile(BaseModel):
     runtime_version_sources: list[VersionSource] = Field(default_factory=list)
     default_manager_version: str = ""
     manager_version_sources: list[VersionSource] = Field(default_factory=list)
+    rejected_content: list[RejectedContent] = Field(default_factory=list)
     resolve_script: str
     resolved_graph_script: str
     instructions: str
@@ -105,9 +126,14 @@ class PackageManagerProfile(BaseModel):
 
     @field_validator("image_template")
     @classmethod
-    def runtime_placeholder_required(cls, value: str) -> str:
-        if "{runtime_version}" not in value:
-            raise ValueError("image_template must contain {runtime_version}")
+    def version_placeholder_required(cls, value: str) -> str:
+        if not any(
+            placeholder in value
+            for placeholder in ("{runtime_version}", "{manager_version}")
+        ):
+            raise ValueError(
+                "image_template must contain {runtime_version} or {manager_version}"
+            )
         return value
 
     def matches(self, workdir: Path) -> bool:
@@ -124,6 +150,18 @@ class PackageManagerProfile(BaseModel):
                     continue
                 paths.add(path)
         return sorted(paths)
+
+    def validate_workspace(self, workdir: Path) -> None:
+        for rule in self.rejected_content:
+            path = workdir / rule.path
+            if path.is_file() and re.search(
+                rule.pattern,
+                path.read_text(encoding="utf-8"),
+                re.MULTILINE,
+            ):
+                raise ValueError(
+                    f"{self.name} driver rejects {rule.path}: {rule.reason}"
+                )
 
     def allows_manifest(self, relative_path: str) -> bool:
         path = PurePosixPath(relative_path)
@@ -144,10 +182,17 @@ class PackageManagerProfile(BaseModel):
         )
 
     def image(self, workdir: Path) -> str:
-        version = self.runtime_version(workdir).removeprefix("ruby-")
-        if not re.fullmatch(r"\d+(?:\.\d+){0,2}", version):
-            raise ValueError(f"unsafe runtime version in profile input: {version!r}")
-        return self.image_template.format(runtime_version=version)
+        runtime_version = self._safe_image_version(
+            self.runtime_version(workdir).removeprefix("ruby-"),
+            "runtime",
+        )
+        manager_version = self.manager_version(workdir)
+        if "{manager_version}" in self.image_template:
+            manager_version = self._safe_image_version(manager_version, "package-manager")
+        return self.image_template.format(
+            runtime_version=runtime_version,
+            manager_version=manager_version,
+        )
 
     def parse_resolved_graph(self, output: str, targets: list[str]) -> dict[str, list[str]]:
         try:
@@ -231,6 +276,12 @@ class PackageManagerProfile(BaseModel):
             if match is not None:
                 return match.group("version").strip()
         return default
+
+    @staticmethod
+    def _safe_image_version(value: str, kind: str) -> str:
+        if not re.fullmatch(r"\d+(?:\.\d+){0,2}", value):
+            raise ValueError(f"unsafe {kind} version in profile input: {value!r}")
+        return value
 
 
 def load_builtin_profiles() -> list[PackageManagerProfile]:
