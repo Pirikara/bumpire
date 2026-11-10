@@ -1,0 +1,5 @@
+[project]
+name = "uv-conformance"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = ["idna>=3.9", "packaging>=24.0"]

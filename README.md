@@ -175,7 +175,7 @@ uv run bumpire publish \
 
 Use `--workspace path/to/app` for a package nested inside a monorepo. If multiple
 profiles match the same workspace, select one explicitly with `--ecosystem` followed by
-`npm`, `pnpm`, `yarn`, `bun`, or `bundler`.
+`npm`, `pnpm`, `yarn`, `bun`, `bundler`, or `uv`.
 
 ## What gets verified
 
@@ -241,12 +241,15 @@ Python adapters.
 | Yarn Classic / Berry | `package.json` + `yarn.lock` | Dependency-related JSON sections | Version-pinned `yarn install` with scripts disabled | Classic and Berry lockfile reader |
 | Bun | `package.json` + `bun.lock` | Dependency-related JSON sections | `bun install --lockfile-only --ignore-scripts` | Bun's native JSONC reader |
 | Bundler | `Gemfile` + `Gemfile.lock` | `gem` declaration lines | `bundle lock` | `Bundler::LockfileParser` |
+| uv | `pyproject.toml` + `uv.lock` | PEP 621 dependencies, dependency groups, constraints, and overrides | Exact, batched `uv lock --upgrade-package` | Official `uv workspace metadata` JSON |
 
 Bun's legacy binary `bun.lockb` is intentionally unsupported; migrate it to the current
 text-based `bun.lock` before using Bumpire. Pin pnpm, Yarn, and Bun with the
 `packageManager` field when reproducible package-manager selection matters. Yarn projects
 that load custom plugins from `.yarnrc.yml` are rejected because those plugins execute
-repository-controlled code inside the resolver.
+repository-controlled code inside the resolver. The uv driver protects project scripts,
+build settings, indexes, and source mappings; package names are matched using Python's
+normalized-name rules.
 
 A driver profile defines:
 
@@ -306,6 +309,7 @@ Bundler then resolves `activestorage` and the other Rails components to `7.2.3.2
 - CPU, memory, process, and temporary-storage limits are applied.
 - `.git` is mounted read-only inside the container.
 - npm, pnpm, Yarn, and Bun lifecycle scripts are disabled during lockfile resolution.
+- uv performs lockfile resolution only; it does not sync or install the project environment.
 - The agent cannot choose the image, shell command, lockfile, or success condition.
 - Staged, unstaged, and untracked files are all checked against an allowlist.
 - The original repository is never modified.

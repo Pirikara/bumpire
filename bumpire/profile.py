@@ -6,6 +6,8 @@ import difflib
 import json
 import re
 import tomllib
+from collections import Counter
+from copy import deepcopy
 from pathlib import Path, PurePosixPath
 from typing import Literal
 
@@ -38,10 +40,12 @@ class RejectedContent(BaseModel):
 
 
 class ManifestPolicy(BaseModel):
-    kind: Literal["json-sections", "changed-line-patterns"]
+    kind: Literal["json-sections", "changed-line-patterns", "toml-paths"]
     allowed_sections: list[str] = Field(default_factory=list)
     allowed_line_patterns: list[str] = Field(default_factory=list)
+    allowed_paths: list[str] = Field(default_factory=list)
     preserved_declaration_pattern: str | None = None
+    preserved_toml_item_pattern: str | None = None
 
     @model_validator(mode="after")
     def required_rules(self) -> ManifestPolicy:
@@ -49,12 +53,24 @@ class ManifestPolicy(BaseModel):
             raise ValueError("json-sections policy requires allowed_sections")
         if self.kind == "changed-line-patterns" and not self.allowed_line_patterns:
             raise ValueError("changed-line-patterns policy requires allowed_line_patterns")
+        if self.kind == "toml-paths" and not self.allowed_paths:
+            raise ValueError("toml-paths policy requires allowed_paths")
         for pattern in self.allowed_line_patterns:
             re.compile(pattern)
+        for path in self.allowed_paths:
+            if not path or any(
+                not re.fullmatch(r"[A-Za-z0-9_-]+", component)
+                for component in path.split(".")
+            ):
+                raise ValueError(f"unsafe TOML policy path: {path!r}")
         if self.preserved_declaration_pattern is not None:
             compiled = re.compile(self.preserved_declaration_pattern)
             if "name" not in compiled.groupindex:
                 raise ValueError("preserved_declaration_pattern requires a named 'name' group")
+        if self.preserved_toml_item_pattern is not None:
+            compiled = re.compile(self.preserved_toml_item_pattern)
+            if "name" not in compiled.groupindex:
+                raise ValueError("preserved_toml_item_pattern requires a named 'name' group")
         return self
 
 
@@ -205,6 +221,9 @@ class PackageManagerProfile(BaseModel):
         if self.manifest_policy.kind == "json-sections":
             self._validate_json_sections(original, replacement)
             return
+        if self.manifest_policy.kind == "toml-paths":
+            self._validate_toml_paths(original, replacement)
+            return
         changed_lines = [
             line[2:]
             for line in difflib.ndiff(original.splitlines(), replacement.splitlines())
@@ -261,6 +280,102 @@ class PackageManagerProfile(BaseModel):
             removed = sorted(set(before[section]) - set(after[section]))
             if removed:
                 raise ValueError(f"dependencies may not be removed from {section}: {removed}")
+
+    def _validate_toml_paths(self, original: str, replacement: str) -> None:
+        try:
+            before = tomllib.loads(original)
+            after = tomllib.loads(replacement)
+        except tomllib.TOMLDecodeError as exc:
+            raise ValueError(f"manifest replacement is not valid TOML: {exc}") from exc
+        if not isinstance(before, dict) or not isinstance(after, dict):
+            raise ValueError("TOML dependency manifest must contain a table")
+
+        missing = object()
+        pattern = self.manifest_policy.preserved_toml_item_pattern
+        for dotted_path in self.manifest_policy.allowed_paths:
+            path = dotted_path.split(".")
+            previous = self._nested_value(before, path, missing)
+            proposed = self._nested_value(after, path, missing)
+            if previous is not missing and proposed is missing:
+                raise ValueError(f"TOML dependency path may not be removed: {dotted_path}")
+            if proposed is not missing and not isinstance(proposed, (dict, list)):
+                raise ValueError(
+                    f"TOML dependency path must remain a table or array: {dotted_path}"
+                )
+            if pattern is not None and previous is not missing:
+                before_items = self._toml_dependency_items(previous, pattern)
+                after_items = (
+                    Counter()
+                    if proposed is missing
+                    else self._toml_dependency_items(proposed, pattern)
+                )
+                removed = list((before_items - after_items).elements())
+                if removed:
+                    raise ValueError(
+                        f"dependency declarations may not be removed from {dotted_path}: "
+                        f"{removed[:3]}"
+                    )
+
+        protected_before = deepcopy(before)
+        protected_after = deepcopy(after)
+        for dotted_path in self.manifest_policy.allowed_paths:
+            path = dotted_path.split(".")
+            self._remove_nested_path(protected_before, path)
+            self._remove_nested_path(protected_after, path)
+        if protected_before != protected_after:
+            raise ValueError("manifest replacement changes protected TOML fields")
+
+    @staticmethod
+    def _nested_value(document: dict[str, object], path: list[str], missing: object) -> object:
+        current: object = document
+        for component in path:
+            if not isinstance(current, dict) or component not in current:
+                return missing
+            current = current[component]
+        return current
+
+    @classmethod
+    def _remove_nested_path(cls, document: dict[str, object], path: list[str]) -> None:
+        if not path:
+            return
+        component = path[0]
+        if component not in document:
+            return
+        if len(path) == 1:
+            del document[component]
+            return
+        child = document[component]
+        if not isinstance(child, dict):
+            return
+        cls._remove_nested_path(child, path[1:])
+        if not child:
+            del document[component]
+
+    @staticmethod
+    def _toml_dependency_items(value: object, pattern: str) -> Counter[str]:
+        items: Counter[str] = Counter()
+        compiled = re.compile(pattern)
+
+        def collect(candidate: object, *, list_item: bool = False) -> None:
+            if isinstance(candidate, str):
+                match = compiled.search(candidate)
+                if match is not None:
+                    items[f"package:{match.group('name')}"] += 1
+                return
+            if isinstance(candidate, list):
+                for item in candidate:
+                    collect(item, list_item=True)
+                return
+            if isinstance(candidate, dict):
+                if list_item:
+                    serialized = json.dumps(candidate, sort_keys=True, separators=(",", ":"))
+                    items[f"entry:{serialized}"] += 1
+                    return
+                for item in candidate.values():
+                    collect(item)
+
+        collect(value)
+        return items
 
     @staticmethod
     def _extract_version(

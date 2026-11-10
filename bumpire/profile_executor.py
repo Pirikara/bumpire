@@ -157,6 +157,9 @@ class ProfileExecutor:
                     args=("sh", "-ceu", self.profile.resolve_script, "bumpire-driver"),
                     environment={
                         "BUMPIRE_MANAGER_VERSION": self.profile.manager_version(sandbox.workdir),
+                        "BUMPIRE_UPDATE_TARGETS_JSON": json.dumps(
+                            [target.model_dump(mode="json") for target in request.targets]
+                        ),
                     },
                 ),
                 timeout=600,

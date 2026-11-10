@@ -18,6 +18,8 @@ class DriverCase:
     files: dict[str, str]
     targets: list[str]
     expected: dict[str, list[str]]
+    updates: list[dict[str, str]] | None = None
+    expected_after: dict[str, list[str]] | None = None
 
 
 _CASES = [
@@ -148,9 +150,29 @@ lodash@^4.17.0:
         targets=["lodash", "@scope/pkg"],
         expected={"lodash": ["4.18.1"], "@scope/pkg": ["1.2.3"]},
     ),
+    DriverCase(
+        id="uv-workspace-metadata",
+        profile="uv",
+        files={
+            "pyproject.toml": (
+                Path(__file__).parent / "fixtures" / "uv" / "pyproject.toml"
+            ).read_text(encoding="utf-8"),
+            "uv.lock": (Path(__file__).parent / "fixtures" / "uv" / "uv.lock").read_text(
+                encoding="utf-8"
+            ),
+            ".python-version": "3.12\n",
+        },
+        targets=["IDNA", "packaging"],
+        expected={"IDNA": ["3.9"], "packaging": ["24.0"]},
+        updates=[
+            {"package": "idna", "version": "3.10"},
+            {"package": "packaging", "version": "24.1"},
+        ],
+        expected_after={"idna": ["3.10"], "packaging": ["24.1"]},
+    ),
 ]
 
-_RESOLVER_CASES = [case for case in _CASES if case.profile in {"bun", "pnpm", "yarn"}]
+_RESOLVER_CASES = [case for case in _CASES if case.profile in {"bun", "pnpm", "uv", "yarn"}]
 
 
 def _write_fixture(root: Path, files: dict[str, str]) -> None:
@@ -195,7 +217,7 @@ def test_resolved_graph_driver_contract(case: DriverCase, tmp_path: Path) -> Non
     reason="set BUMPIRE_DRIVER_CONFORMANCE=1 to run Docker driver contracts",
 )
 @pytest.mark.parametrize("case", _RESOLVER_CASES, ids=lambda case: case.id)
-def test_javascript_driver_resolver_contract(case: DriverCase, tmp_path: Path) -> None:
+def test_driver_resolver_contract(case: DriverCase, tmp_path: Path) -> None:
     profiles = {profile.name: profile for profile in load_builtin_profiles()}
     profile = profiles[case.profile]
     _write_fixture(tmp_path, case.files)
@@ -209,7 +231,10 @@ def test_javascript_driver_resolver_contract(case: DriverCase, tmp_path: Path) -
         ContainerCommand(
             image=profile.image(tmp_path),
             args=("sh", "-ceu", profile.resolve_script, "bumpire-driver"),
-            environment={"BUMPIRE_MANAGER_VERSION": profile.manager_version(tmp_path)},
+            environment={
+                "BUMPIRE_MANAGER_VERSION": profile.manager_version(tmp_path),
+                "BUMPIRE_UPDATE_TARGETS_JSON": json.dumps(case.updates or []),
+            },
         ),
         clone_root=tmp_path,
         workspace=PurePosixPath("."),
@@ -228,3 +253,20 @@ def test_javascript_driver_resolver_contract(case: DriverCase, tmp_path: Path) -
         if before.get(path) != after.get(path)
     }
     assert changed <= set(profile.lockfiles)
+
+    if case.expected_after is not None:
+        targets = list(case.expected_after)
+        graph = DockerRuntime(EventLogger(stream=StringIO())).run(
+            ContainerCommand(
+                image=profile.image(tmp_path),
+                args=("sh", "-ceu", profile.resolved_graph_script, "bumpire-driver"),
+                environment={"BUMPIRE_TARGETS_JSON": json.dumps(targets)},
+                network="none",
+                writable_workspace=False,
+            ),
+            clone_root=tmp_path,
+            workspace=PurePosixPath("."),
+            timeout=120,
+        )
+        assert graph.ok, graph.stderr or graph.stdout
+        assert profile.parse_resolved_graph(graph.stdout, targets) == case.expected_after

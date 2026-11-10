@@ -237,7 +237,7 @@ wheels = [
 
 [[package]]
 name = "bumpire"
-version = "0.5.0"
+version = "0.6.0"
 source = { editable = "." }
 dependencies = [
     { name = "openai-agents", extra = ["litellm"] },
