@@ -1,0 +1,11 @@
+[project]
+name = "pdm-conformance"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = ["requests==2.32.3", "idna>=3.9"]
+
+[dependency-groups]
+dev = ["packaging>=24.0,<25"]
+
+[tool.pdm]
+distribution = false

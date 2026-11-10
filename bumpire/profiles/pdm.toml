@@ -1,0 +1,216 @@
+name = "pdm"
+ecosystem = "pdm"
+detect_all = ["pyproject.toml", "pdm.lock"]
+manifest_globs = ["pyproject.toml", "**/pyproject.toml"]
+lockfiles = ["pdm.lock"]
+image_template = "python:{runtime_version}-slim"
+default_runtime_version = "3.12"
+default_manager_version = "2.29.7"
+instructions = """
+Edit dependency declarations in pyproject.toml only. Preserve project metadata, Python
+runtime constraints, scripts, build settings, indexes, sources, plugins, workspace
+settings, resolution strategy, and unrelated dependencies. Coordinate PEP 621
+requirements, optional dependencies, PEP 735 groups, legacy PDM development groups,
+and existing resolution overrides when they block a valid exact target. Never edit
+pdm.lock directly; PDM owns it. Resolve every target to its exact requested version as
+one coherent update. Do not add a transitive target as a new direct dependency merely
+to request its lockfile version; the resolver applies exact target constraints.
+"""
+resolve_script = '''
+mkdir -p "$HOME" /tmp/pip-cache /tmp/pdm-cache /tmp/pdm-config /bumpire-tools/pdm
+export PIP_CACHE_DIR=/tmp/pip-cache
+export PDM_CACHE_DIR=/tmp/pdm-cache
+export PDM_CONFIG_FILE=/tmp/pdm-config/config.toml
+export PDM_CHECK_UPDATE=false
+export PDM_IGNORE_ACTIVE_VENV=1
+export PDM_IGNORE_SAVED_PYTHON=1
+export PDM_LOCK_FORMAT=pdm
+export PDM_PYTHON=/usr/local/bin/python
+export PDM_USE_PYTHON_VERSION=false
+export PDM_USE_UV=false
+export PDM_USE_VENV=false
+python -m pip install \
+  --disable-pip-version-check \
+  --no-compile \
+  --no-input \
+  --only-binary=:all: \
+  --target /bumpire-tools/pdm \
+  "pdm==${BUMPIRE_MANAGER_VERSION}"
+export PATH="/bumpire-tools/pdm/bin:$PATH"
+export PYTHONPATH=/bumpire-tools/pdm
+python - <<'PY'
+import json
+import os
+import re
+import subprocess
+import tomllib
+
+from packaging.requirements import InvalidRequirement, Requirement
+
+targets = json.loads(os.environ.get("BUMPIRE_UPDATE_TARGETS_JSON", "[]"))
+if not isinstance(targets, list) or not targets:
+    raise SystemExit("BUMPIRE_UPDATE_TARGETS_JSON must be a non-empty array")
+had_saved_python = os.path.lexists(".pdm-python")
+saved_python = None
+if had_saved_python and os.path.isfile(".pdm-python") and not os.path.islink(".pdm-python"):
+    with open(".pdm-python", "rb") as stream:
+        saved_python = stream.read()
+
+requirements = []
+for target in targets:
+    if (
+        not isinstance(target, dict)
+        or not isinstance(target.get("package"), str)
+        or not isinstance(target.get("version"), str)
+    ):
+        raise SystemExit("each update target must contain package and version strings")
+    requirements.append(f"{target['package']}=={target['version']}")
+
+override_path = "/tmp/bumpire-pdm-overrides.txt"
+with open(override_path, "w", encoding="utf-8") as stream:
+    stream.write("\n".join(requirements) + "\n")
+
+with open("pdm.lock", "rb") as stream:
+    lock = tomllib.load(stream)
+with open("pyproject.toml", "rb") as stream:
+    manifest = tomllib.load(stream)
+
+normalize = lambda name: re.sub(r"[-_.]+", "-", name).lower()
+direct_groups = {}
+
+def collect(group, requirements):
+    if not isinstance(requirements, list):
+        return
+    for requirement in requirements:
+        if not isinstance(requirement, str):
+            continue
+        try:
+            name = Requirement(requirement).name
+        except InvalidRequirement:
+            continue
+        direct_groups.setdefault(normalize(name), set()).add(group)
+
+project = manifest.get("project", {})
+if isinstance(project, dict):
+    collect("default", project.get("dependencies"))
+    optional = project.get("optional-dependencies", {})
+    if isinstance(optional, dict):
+        for group, requirements_in_group in optional.items():
+            if isinstance(group, str):
+                collect(group, requirements_in_group)
+
+dependency_groups = manifest.get("dependency-groups", {})
+if isinstance(dependency_groups, dict):
+    for group, requirements_in_group in dependency_groups.items():
+        if isinstance(group, str):
+            collect(group, requirements_in_group)
+
+tool = manifest.get("tool", {})
+pdm = tool.get("pdm", {}) if isinstance(tool, dict) else {}
+legacy_groups = pdm.get("dev-dependencies", {}) if isinstance(pdm, dict) else {}
+if isinstance(legacy_groups, dict):
+    for group, requirements_in_group in legacy_groups.items():
+        if isinstance(group, str):
+            collect(group, requirements_in_group)
+
+locked_groups = {}
+packages = lock.get("package", [])
+if isinstance(packages, list):
+    for package in packages:
+        if not isinstance(package, dict) or not isinstance(package.get("name"), str):
+            continue
+        groups = package.get("groups", [])
+        if isinstance(groups, list) and all(isinstance(group, str) for group in groups):
+            locked_groups.setdefault(normalize(package["name"]), set()).update(groups)
+
+base = [
+    "pdm",
+    "--non-interactive",
+    "--ignore-python",
+]
+for target in targets:
+    normalized = normalize(target["package"])
+    groups = direct_groups.get(normalized) or locked_groups.get(normalized) or {"default"}
+    group = "default" if "default" in groups else sorted(groups)[0]
+    group_args = [] if group == "default" else ["-G", group]
+    subprocess.run(
+        [
+            *base,
+            "update",
+            *group_args,
+            target["package"],
+            "--no-sync",
+            "--skip",
+            ":all",
+            "--update-reuse",
+            "--override",
+            override_path,
+        ],
+        check=True,
+    )
+subprocess.run(
+    [*base, "lock", "--skip", ":all", "--update-reuse"],
+    check=True,
+)
+if saved_python is not None:
+    if os.path.lexists(".pdm-python") and (
+        os.path.islink(".pdm-python") or not os.path.isfile(".pdm-python")
+    ):
+        os.unlink(".pdm-python")
+    with open(".pdm-python", "wb") as stream:
+        stream.write(saved_python)
+elif not had_saved_python and os.path.lexists(".pdm-python"):
+    os.unlink(".pdm-python")
+PY
+'''
+resolved_graph_script = '''
+python - <<'PY'
+import json
+import os
+import re
+import tomllib
+
+targets = json.loads(os.environ.get("BUMPIRE_TARGETS_JSON", "[]"))
+if not isinstance(targets, list) or any(not isinstance(name, str) for name in targets):
+    raise SystemExit("BUMPIRE_TARGETS_JSON must be an array of package names")
+
+with open("pdm.lock", "rb") as stream:
+    lock = tomllib.load(stream)
+locked_packages = lock.get("package")
+if not isinstance(locked_packages, list):
+    raise SystemExit("pdm.lock has no package list")
+
+normalize = lambda name: re.sub(r"[-_.]+", "-", name).lower()
+requested = {}
+for target in targets:
+    requested.setdefault(normalize(target), []).append(target)
+versions = {target: set() for target in targets}
+
+for package in locked_packages:
+    if not isinstance(package, dict):
+        continue
+    name = package.get("name")
+    version = package.get("version")
+    if not isinstance(name, str) or not isinstance(version, str) or not version:
+        continue
+    for target in requested.get(normalize(name), []):
+        versions[target].add(version)
+
+packages = {target: sorted(versions[target]) for target in targets}
+print(json.dumps({"schema_version": 1, "packages": packages}, separators=(",", ":")))
+PY
+'''
+
+[manifest_policy]
+kind = "toml-paths"
+allowed_paths = [
+  "project.dependencies",
+  "project.optional-dependencies",
+  "dependency-groups",
+  "tool.pdm.dev-dependencies",
+  "tool.pdm.resolution.overrides",
+]
+preserved_toml_table_key_paths = ["tool.pdm.resolution.overrides"]
+mutable_toml_table_value_keys = ["version"]
+preserved_toml_item_pattern = '''^\s*(?P<name>[A-Za-z0-9][A-Za-z0-9._-]*)'''
+protected_toml_item_pattern = '''@|(?:git\+|https?://|file:)'''
