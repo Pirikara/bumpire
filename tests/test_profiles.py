@@ -14,7 +14,16 @@ def _profiles_by_name():
 def test_builtin_profiles_are_declarative_and_complete() -> None:
     profiles = _profiles_by_name()
 
-    assert set(profiles) == {"bun", "bundler", "npm", "pnpm", "poetry", "uv", "yarn"}
+    assert set(profiles) == {
+        "bun",
+        "bundler",
+        "npm",
+        "pdm",
+        "pnpm",
+        "poetry",
+        "uv",
+        "yarn",
+    }
     assert "npm install --package-lock-only" in profiles["npm"].resolve_script
     assert "pnpm install --lockfile-only" in profiles["pnpm"].resolve_script
     assert "yarn install" in profiles["yarn"].resolve_script
@@ -25,6 +34,8 @@ def test_builtin_profiles_are_declarative_and_complete() -> None:
     assert "JSON.stringify" in profiles["npm"].resolved_graph_script
     assert "Bundler::LockfileParser" in profiles["bundler"].resolved_graph_script
     assert 'open("poetry.lock"' in profiles["poetry"].resolved_graph_script
+    assert 'open("pdm.lock"' in profiles["pdm"].resolved_graph_script
+    assert '"update"' in profiles["pdm"].resolve_script
     assert "uv workspace metadata" in profiles["uv"].resolved_graph_script
 
 
@@ -173,6 +184,23 @@ requires-poetry = "==2.5.1"
 
     assert profile.name == "poetry"
     assert profile.manager_version(tmp_path) == "2.5.1"
+    assert profile.image(tmp_path) == "python:3.12-slim"
+
+
+def test_pdm_profile_detects_lockfile_and_uses_pinned_default(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "example"\nversion = "0.1.0"\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "pdm.lock").write_text(
+        '[metadata]\ngroups = ["default"]\n\npackage = []\n',
+        encoding="utf-8",
+    )
+
+    profile = detect_profile(tmp_path, ".")
+
+    assert profile.name == "pdm"
+    assert profile.manager_version(tmp_path) == "2.29.7"
     assert profile.image(tmp_path) == "python:3.12-slim"
 
 
@@ -454,6 +482,86 @@ priority = "primary"
         profile.validate_manifest_replacement(
             private_original,
             private_update.replace('source = "private"', 'source = "other"'),
+        )
+
+
+def test_pdm_manifest_policy_supports_dependency_groups_and_protects_config() -> None:
+    profile = _profiles_by_name()["pdm"]
+    original = """[project]
+name = "example"
+requires-python = ">=3.12"
+dependencies = ["Django==5.1.1", "idna>=3.9"]
+
+[project.optional-dependencies]
+docs = ["mkdocs==1.6.0"]
+
+[project.scripts]
+example = "example:main"
+
+[dependency-groups]
+dev = ["pytest==8.3.0", { include-group = "lint" }]
+lint = ["ruff==0.11.0"]
+
+[tool.pdm]
+distribution = false
+
+[tool.pdm.resolution]
+respect-source-order = true
+
+[tool.pdm.resolution.overrides]
+urllib3 = "2.5.0"
+
+[tool.pdm.dev-dependencies]
+legacy = ["coverage==7.6.0"]
+
+[[tool.pdm.source]]
+name = "pypi"
+url = "https://pypi.org/simple"
+"""
+    dependency_update = original.replace("Django==5.1.1", "Django==5.2.1")
+    dependency_update = dependency_update.replace("mkdocs==1.6.0", "mkdocs==1.6.1")
+    dependency_update = dependency_update.replace("pytest==8.3.0", "pytest==8.4.0")
+    dependency_update = dependency_update.replace("ruff==0.11.0", "ruff==0.12.0")
+    dependency_update = dependency_update.replace("urllib3 = \"2.5.0\"", "urllib3 = \"2.6.0\"")
+    dependency_update = dependency_update.replace("coverage==7.6.0", "coverage==7.7.0")
+
+    profile.validate_manifest_replacement(original, dependency_update)
+
+    protected_replacements = [
+        dependency_update.replace('requires-python = ">=3.12"', 'requires-python = ">=3.13"'),
+        dependency_update.replace('example = "example:main"', 'example = "other:main"'),
+        dependency_update.replace("respect-source-order = true", "respect-source-order = false"),
+        dependency_update.replace("https://pypi.org/simple", "https://example.invalid/simple"),
+    ]
+    for replacement in protected_replacements:
+        with pytest.raises(ValueError, match="protected TOML field"):
+            profile.validate_manifest_replacement(original, replacement)
+
+    with pytest.raises(ValueError, match="declarations may not be removed"):
+        profile.validate_manifest_replacement(
+            original,
+            dependency_update.replace(', "idna>=3.9"', ""),
+        )
+    with pytest.raises(ValueError, match="declarations may not be removed"):
+        profile.validate_manifest_replacement(
+            original,
+            dependency_update.replace(', { include-group = "lint" }', ""),
+        )
+    with pytest.raises(ValueError, match="source declarations may not change"):
+        profile.validate_manifest_replacement(
+            original,
+            dependency_update.replace(
+                '"idna>=3.9"',
+                '"idna @ https://example.invalid/idna.whl"',
+            ),
+        )
+    with pytest.raises(ValueError, match="source or selector fields may not change"):
+        profile.validate_manifest_replacement(
+            original,
+            dependency_update.replace(
+                'urllib3 = "2.6.0"',
+                'urllib3 = { version = "2.6.0", url = "https://example.invalid/pkg.whl" }',
+            ),
         )
 
 
