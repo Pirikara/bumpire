@@ -26,6 +26,7 @@ def test_docker_command_has_isolation_boundaries(tmp_path) -> None:
     assert args[args.index("--cap-drop") + 1] == "ALL"
     assert args[args.index("--security-opt") + 1] == "no-new-privileges"
     assert args[args.index("--network") + 1] == "bridge"
+    assert "/bumpire-tools:rw,exec,nosuid,nodev,size=256m" in args
     assert args[args.index("--workdir") + 1] == "/workspace/web"
     assert "dev.bumpire.ephemeral=true" in args
     assert f"type=bind,src={clone.resolve()},dst=/workspace" in args

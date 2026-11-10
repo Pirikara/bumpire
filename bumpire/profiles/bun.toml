@@ -1,0 +1,72 @@
+name = "bun"
+ecosystem = "bun"
+detect_all = ["package.json", "bun.lock"]
+manifest_globs = ["package.json", "**/package.json"]
+lockfiles = ["bun.lock"]
+image_template = "oven/bun:{manager_version}-slim"
+default_runtime_version = "22"
+default_manager_version = "1.4.4"
+instructions = """
+Edit package.json dependency fields only. Preserve unrelated metadata and formatting as
+closely as possible. Coordinate root, workspace, peerDependencies, overrides, and
+resolutions when they block an exact target. Never edit bun.lock directly; Bun owns it.
+Resolve every target to its exact requested version atomically.
+"""
+resolve_script = '''
+mkdir -p "$HOME" /tmp/bun-cache
+export BUN_INSTALL_CACHE_DIR=/tmp/bun-cache
+bun install --lockfile-only --ignore-scripts --no-progress --no-summary
+'''
+resolved_graph_script = '''
+bun - <<'BUN'
+const targets = JSON.parse(process.env.BUMPIRE_TARGETS_JSON || "[]");
+if (!Array.isArray(targets) || targets.some((name) => typeof name !== "string")) {
+  throw new Error("BUMPIRE_TARGETS_JSON must be an array of package names");
+}
+const versions = Object.fromEntries(targets.map((name) => [name, new Set()]));
+const lock = Bun.JSONC.parse(await Bun.file("bun.lock").text());
+
+const record = (resolution) => {
+  if (typeof resolution !== "string") return;
+  const separator = resolution.startsWith("@")
+    ? resolution.indexOf("@", resolution.indexOf("/") + 1)
+    : resolution.indexOf("@");
+  if (separator <= 0) return;
+  const name = resolution.slice(0, separator);
+  const version = resolution.slice(separator + 1).replace(/^npm:/, "");
+  if (Object.hasOwn(versions, name) && version) versions[name].add(version);
+};
+
+if (Array.isArray(lock.packages)) {
+  for (const entry of lock.packages) record(entry?.[0]);
+} else if (lock.packages && typeof lock.packages === "object") {
+  for (const entry of Object.values(lock.packages)) record(entry?.[0]);
+}
+for (const workspace of Object.values(lock.workspaces || {})) {
+  if (workspace?.name && workspace?.version && Object.hasOwn(versions, workspace.name)) {
+    versions[workspace.name].add(workspace.version);
+  }
+}
+
+const packages = Object.fromEntries(
+  targets.map((name) => [name, [...versions[name]].sort()]),
+);
+process.stdout.write(JSON.stringify({schema_version: 1, packages}));
+BUN
+'''
+
+[manifest_policy]
+kind = "json-sections"
+allowed_sections = [
+  "dependencies",
+  "devDependencies",
+  "optionalDependencies",
+  "peerDependencies",
+  "peerDependenciesMeta",
+  "overrides",
+  "resolutions",
+]
+
+[[manager_version_sources]]
+path = "package.json"
+pattern = '"packageManager"\s*:\s*"bun@(?P<version>\d+\.\d+\.\d+)'

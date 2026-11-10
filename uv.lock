@@ -9,7 +9,7 @@ resolution-markers = [
 ]
 
 [options]
-exclude-newer = "2026-11-07T05:40:08.534194Z"
+exclude-newer = "2026-11-07T09:51:09.139889Z"
 exclude-newer-span = "P3D"
 
 [[package]]
@@ -237,7 +237,7 @@ wheels = [
 
 [[package]]
 name = "bumpire"
-version = "0.4.0"
+version = "0.5.0"
 source = { editable = "." }
 dependencies = [
     { name = "openai-agents", extra = ["litellm"] },

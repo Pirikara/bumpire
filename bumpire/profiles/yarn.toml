@@ -1,0 +1,112 @@
+name = "yarn"
+ecosystem = "yarn"
+detect_all = ["package.json", "yarn.lock"]
+manifest_globs = ["package.json", "**/package.json"]
+lockfiles = ["yarn.lock"]
+image_template = "node:{runtime_version}-bookworm-slim"
+default_runtime_version = "22"
+default_manager_version = "1.22.22"
+instructions = """
+Edit package.json dependency fields only. Preserve unrelated metadata and formatting as
+closely as possible. Coordinate root, workspace, peerDependencies, and resolutions when
+they block an exact target. Never edit yarn.lock directly; the resolver owns it. Resolve
+every target to its exact requested version atomically.
+"""
+resolve_script = '''
+mkdir -p "$HOME" /tmp/corepack /tmp/yarn-cache /tmp/yarn-modules
+export COREPACK_HOME=/tmp/corepack
+export YARN_IGNORE_PATH=1
+export YARN_INSTALL_STATE_PATH=/tmp/yarn-install-state.gz
+export YARN_ENABLE_CONSTRAINTS_CHECKS=false
+corepack prepare "yarn@${BUMPIRE_MANAGER_VERSION}" --activate
+case "${BUMPIRE_MANAGER_VERSION}" in
+  1.*)
+    corepack yarn install --ignore-scripts --non-interactive --modules-folder /tmp/yarn-modules --cache-folder /tmp/yarn-cache
+    ;;
+  *)
+    export YARN_ENABLE_SCRIPTS=false
+    export YARN_ENABLE_GLOBAL_CACHE=true
+    export YARN_CACHE_FOLDER=/tmp/yarn-cache
+    corepack yarn install --mode=update-lockfile
+    ;;
+esac
+'''
+resolved_graph_script = '''
+node <<'NODE'
+const fs = require("fs");
+
+const targets = JSON.parse(process.env.BUMPIRE_TARGETS_JSON || "[]");
+if (!Array.isArray(targets) || targets.some((name) => typeof name !== "string")) {
+  throw new Error("BUMPIRE_TARGETS_JSON must be an array of package names");
+}
+const versions = Object.fromEntries(targets.map((name) => [name, new Set()]));
+const lines = fs.readFileSync("yarn.lock", "utf8").split(/\r?\n/);
+
+const selectorName = (selector) => {
+  selector = selector.replace(/^['"]|['"]$/g, "").split(",", 1)[0].trim();
+  const separator = selector.startsWith("@")
+    ? selector.indexOf("@", selector.indexOf("/") + 1)
+    : selector.indexOf("@");
+  return separator > 0 ? selector.slice(0, separator) : "";
+};
+const locator = (value) => {
+  value = value.replace(/^['"]|['"]$/g, "");
+  const match = value.match(/^((?:@[^/]+\/)?[^@]+)@npm:([^:]+)$/);
+  return match ? {name: match[1], version: match[2]} : null;
+};
+
+let classicName = "";
+for (const line of lines) {
+  if (line && !/^\s/.test(line) && line.endsWith(":")) {
+    classicName = selectorName(line.slice(0, -1));
+    continue;
+  }
+  const berry = line.match(/^\s+resolution:\s*(.+)\s*$/);
+  if (berry) {
+    const resolved = locator(berry[1]);
+    if (resolved && Object.hasOwn(versions, resolved.name)) {
+      versions[resolved.name].add(resolved.version);
+    }
+    continue;
+  }
+  const berryVersion = line.match(/^\s+version:\s*['"]?([^'"\s]+)['"]?\s*$/);
+  if (berryVersion && Object.hasOwn(versions, classicName)) {
+    versions[classicName].add(berryVersion[1]);
+    continue;
+  }
+  const classic = line.match(/^\s+version\s+"([^"]+)"\s*$/);
+  if (classic && Object.hasOwn(versions, classicName)) {
+    versions[classicName].add(classic[1]);
+  }
+}
+
+const packages = Object.fromEntries(
+  targets.map((name) => [name, [...versions[name]].sort()]),
+);
+process.stdout.write(JSON.stringify({schema_version: 1, packages}));
+NODE
+'''
+
+[manifest_policy]
+kind = "json-sections"
+allowed_sections = [
+  "dependencies",
+  "devDependencies",
+  "optionalDependencies",
+  "peerDependencies",
+  "peerDependenciesMeta",
+  "resolutions",
+]
+
+[[runtime_version_sources]]
+path = "package.json"
+pattern = '"node"\s*:\s*"(?P<version>\d+\.\d+\.\d+)"'
+
+[[manager_version_sources]]
+path = "package.json"
+pattern = '"packageManager"\s*:\s*"yarn@(?P<version>\d+\.\d+\.\d+)'
+
+[[rejected_content]]
+path = ".yarnrc.yml"
+pattern = '^\s*plugins\s*:'
+reason = "custom Yarn plugins execute repository-controlled code during resolution"

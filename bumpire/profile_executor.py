@@ -46,6 +46,7 @@ class ProfileExecutor:
             raise ValueError(f"profile {self.profile.name} cannot handle {request.ecosystem}")
         base_commit, base_ref = self._repository_state()
         workdir = self._workdir(self.repo)
+        self.profile.validate_workspace(workdir)
         manifests = self.profile.manifest_paths(workdir)
         if not manifests:
             raise ValueError(f"profile {self.profile.name} found no dependency manifests")

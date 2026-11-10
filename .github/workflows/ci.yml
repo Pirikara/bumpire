@@ -26,3 +26,19 @@ jobs:
         run: uv run pytest -q
       - name: Build
         run: uv build
+
+  driver-conformance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          enable-cache: true
+      - name: Set up Python
+        run: uv python install 3.12
+      - name: Install dependencies
+        run: uv sync --frozen --group dev
+      - name: Exercise trusted graph readers
+        env:
+          BUMPIRE_DRIVER_CONFORMANCE: "1"
+        run: uv run pytest -q tests/test_driver_conformance.py

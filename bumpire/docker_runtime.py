@@ -122,6 +122,8 @@ class DockerRuntime:
             f"{uid}:{gid}",
             "--tmpfs",
             "/tmp:rw,nosuid,nodev,size=512m",
+            "--tmpfs",
+            "/bumpire-tools:rw,exec,nosuid,nodev,size=256m",
             "--mount",
             (
                 f"type=bind,src={clone_root},dst=/workspace"

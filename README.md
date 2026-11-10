@@ -174,8 +174,8 @@ uv run bumpire publish \
 ```
 
 Use `--workspace path/to/app` for a package nested inside a monorepo. If multiple
-profiles match the same workspace, select one explicitly with `--ecosystem npm` or
-`--ecosystem bundler`.
+profiles match the same workspace, select one explicitly with `--ecosystem` followed by
+`npm`, `pnpm`, `yarn`, `bun`, or `bundler`.
 
 ## What gets verified
 
@@ -237,7 +237,16 @@ Python adapters.
 | Driver | Detection | Agent-editable surface | Trusted resolver | Graph reader |
 |---|---|---|---|---|
 | npm | `package.json` + `package-lock.json` | Dependency-related JSON sections | `npm install --package-lock-only --ignore-scripts` | JSON via Node.js |
+| pnpm | `package.json` + `pnpm-lock.yaml` | Dependency-related JSON sections | `pnpm install --lockfile-only --ignore-scripts` | Lockfile graph via Node.js |
+| Yarn Classic / Berry | `package.json` + `yarn.lock` | Dependency-related JSON sections | Version-pinned `yarn install` with scripts disabled | Classic and Berry lockfile reader |
+| Bun | `package.json` + `bun.lock` | Dependency-related JSON sections | `bun install --lockfile-only --ignore-scripts` | Bun's native JSONC reader |
 | Bundler | `Gemfile` + `Gemfile.lock` | `gem` declaration lines | `bundle lock` | `Bundler::LockfileParser` |
+
+Bun's legacy binary `bun.lockb` is intentionally unsupported; migrate it to the current
+text-based `bun.lock` before using Bumpire. Pin pnpm, Yarn, and Bun with the
+`packageManager` field when reproducible package-manager selection matters. Yarn projects
+that load custom plugins from `.yarnrc.yml` are rejected because those plugins execute
+repository-controlled code inside the resolver.
 
 A driver profile defines:
 
@@ -296,7 +305,7 @@ Bundler then resolves `activestorage` and the other Rails components to `7.2.3.2
 - Linux capabilities are dropped and `no-new-privileges` is enabled.
 - CPU, memory, process, and temporary-storage limits are applied.
 - `.git` is mounted read-only inside the container.
-- npm lifecycle scripts are disabled during lockfile resolution.
+- npm, pnpm, Yarn, and Bun lifecycle scripts are disabled during lockfile resolution.
 - The agent cannot choose the image, shell command, lockfile, or success condition.
 - Staged, unstaged, and untracked files are all checked against an allowlist.
 - The original repository is never modified.
@@ -331,8 +340,13 @@ logging hooks.
 uv sync
 uv run ruff check bumpire tests
 uv run pytest -q
+BUMPIRE_DRIVER_CONFORMANCE=1 uv run pytest -q tests/test_driver_conformance.py
 uv build
 ```
+
+The driver conformance suite executes each trusted graph reader in a networkless,
+read-only Docker mount and exercises each JavaScript resolver in a writable disposable
+workspace. CI runs it as a separate required job.
 
 ## License
 
