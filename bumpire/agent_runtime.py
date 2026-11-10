@@ -183,10 +183,10 @@ class AgentUpdateRunner:
 
     async def run(self, request: UpdateRequest) -> UpdateResult:
         project = self.executor.inspect(request)
-        if self.executor.request_is_satisfied(request, project.target_locked_versions):
+        if self.executor.request_is_satisfied(request, project.target_resolved_versions):
             packages = ", ".join(target.package for target in request.targets)
             self.events.emit(
-                "finish", f"Requested targets already satisfy their policies: {packages}"
+                "finish", f"Requested targets already resolve exactly: {packages}"
             )
             return UpdateResult(status="already_satisfied", request=request, attempts=[])
 
@@ -272,18 +272,19 @@ change; preserve unrelated content and formatting exactly when practical. Never 
 a partial snippet. Never edit a lockfile directly: the trusted resolver regenerates it.
 
 Treat every requested target as one atomic update batch. Start with the smallest coherent
-dependency-manifest change that can satisfy every target's explicit version policy. If
+dependency-manifest change that can resolve every target to its exact requested version. If
 resolution or deterministic verification fails, inspect the returned evidence and try a
 materially different edit. Do not add, remove, or modify source code, scripts, registry
-sources, runtime configuration, or unrelated dependencies. Do not remove a requested
-target unless its policy explicitly permits removal.
+sources, runtime configuration, or unrelated dependencies. Never remove a requested target.
+Do not infer or claim why the caller requested an update, including security, vulnerability,
+compatibility, or policy reasons. Keep rationale limited to dependency-graph mechanics.
 
 Package-manager profile guidance:
 {profile_instructions}
 
 Only success=true from try_dependency_update proves completion. Resolver success proves
 only that the dependency graph resolves, every requested target satisfies its declared
-policy, and changed files pass the allowlist. Never claim API, behavioral, or runtime
+exact version, and changed files pass the allowlist. Never claim API, behavioral, or runtime
 compatibility because application tests run later in the destination repository's CI.
 """.strip()
 
@@ -300,7 +301,7 @@ compatibility because application tests run later in the destination repository'
                     "base_commit": project.base_commit,
                     "base_ref": project.base_ref,
                     "workspace": project.workspace,
-                    "target_locked_versions": project.target_locked_versions,
+                    "target_resolved_versions": project.target_resolved_versions,
                     "allowed_manifest_documents": project.manifest_documents,
                 },
             },

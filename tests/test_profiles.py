@@ -15,10 +15,10 @@ def test_builtin_profiles_are_declarative_and_complete() -> None:
     profiles = _profiles_by_name()
 
     assert set(profiles) == {"bundler", "npm"}
-    assert profiles["npm"].version_scheme == "semver"
-    assert profiles["bundler"].version_scheme == "rubygems"
-    assert "npm install --package-lock-only" in profiles["npm"].resolver_script
-    assert "bundle lock" in profiles["bundler"].resolver_script
+    assert "npm install --package-lock-only" in profiles["npm"].resolve_script
+    assert "bundle lock" in profiles["bundler"].resolve_script
+    assert "JSON.stringify" in profiles["npm"].resolved_graph_script
+    assert "Bundler::LockfileParser" in profiles["bundler"].resolved_graph_script
 
 
 def test_npm_profile_detects_versions_manifests_and_locked_target(tmp_path: Path) -> None:
@@ -54,10 +54,6 @@ def test_npm_profile_detects_versions_manifests_and_locked_target(tmp_path: Path
         "package.json",
         "packages/peer/package.json",
     ]
-    assert profile.locked_versions(
-        (tmp_path / "package-lock.json").read_text(encoding="utf-8"),
-        "lodash",
-    ) == ["4.17.20"]
 
 
 def test_bundler_profile_extracts_versions_and_locked_target(tmp_path: Path) -> None:
@@ -80,33 +76,32 @@ BUNDLED WITH
     assert profile.runtime_version(tmp_path) == "ruby-3.3.10"
     assert profile.manager_version(tmp_path) == "4.0.10"
     assert profile.image(tmp_path) == "ruby:3.3.10-slim"
-    assert profile.locked_versions(
-        (tmp_path / "Gemfile.lock").read_text(encoding="utf-8"),
-        "activestorage",
-    ) == ["7.2.3.1"]
 
 
-def test_bundler_profile_excludes_platform_from_locked_version() -> None:
-    profile = _profiles_by_name()["bundler"]
-
-    assert profile.locked_versions(
-        "    nokogiri (1.18.10-arm64-darwin)\n",
-        "nokogiri",
-    ) == ["1.18.10"]
-
-
-def test_npm_profile_extracts_every_nested_locked_occurrence() -> None:
+def test_driver_protocol_normalizes_resolved_versions() -> None:
     profile = _profiles_by_name()["npm"]
-    lockfile = json.dumps(
-        {
-            "packages": {
-                "node_modules/lodash": {"version": "4.18.1"},
-                "node_modules/consumer/node_modules/lodash": {"version": "4.17.20"},
+
+    versions = profile.parse_resolved_graph(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "packages": {"lodash": ["4.18.1", "4.17.20", "4.18.1"]},
             }
-        }
+        ),
+        ["lodash"],
     )
 
-    assert profile.locked_versions(lockfile, "lodash") == ["4.18.1", "4.17.20"]
+    assert versions == {"lodash": ["4.17.20", "4.18.1"]}
+
+
+def test_driver_protocol_rejects_missing_or_unexpected_targets() -> None:
+    profile = _profiles_by_name()["npm"]
+
+    with pytest.raises(ValueError, match="does not match requested targets"):
+        profile.parse_resolved_graph(
+            '{"schema_version":1,"packages":{"other":["1.0.0"]}}',
+            ["lodash"],
+        )
 
 
 def test_profile_detection_rejects_unknown_workspace(tmp_path: Path) -> None:

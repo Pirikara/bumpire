@@ -11,7 +11,6 @@ from bumpire.models import (
     TargetVerification,
     UpdateRequest,
     VerifiedUpdateArtifact,
-    VersionRequirement,
 )
 from bumpire.process import CommandResult
 from bumpire.publisher import (
@@ -82,7 +81,7 @@ def _artifact(source: Path, *, replacement: str = "lodash=4.18.1\n") -> Verified
     path.write_text(original, encoding="utf-8")
     target = DependencyTarget(
         package="lodash",
-        requirement=VersionRequirement(version="4.18.1"),
+        version="4.18.1",
     )
     request = UpdateRequest(ecosystem="npm", targets=[target])
     return VerifiedUpdateArtifact(

@@ -13,7 +13,6 @@ from bumpire.models import (
     UpdateRequest,
     UpdateResult,
     VerifiedUpdateArtifact,
-    VersionRequirement,
 )
 
 
@@ -23,7 +22,7 @@ def _request() -> UpdateRequest:
         targets=[
             DependencyTarget(
                 package="lodash",
-                requirement=VersionRequirement(version="4.18.1"),
+                version="4.18.1",
             )
         ],
     )
@@ -61,7 +60,7 @@ def _project() -> ProjectState:
         ecosystem="npm",
         package_manager="npm",
         lockfile_path="package-lock.json",
-        target_locked_versions={"lodash": ["4.17.20"]},
+        target_resolved_versions={"lodash": ["4.17.20"]},
     )
 
 
@@ -74,6 +73,7 @@ def test_verified_artifact_binds_diff_to_base_commit_and_request() -> None:
 
     assert artifact.base_commit == "a" * 40
     assert artifact.base_ref == "main"
+    assert artifact.schema_version == 2
     assert artifact.diff_sha256 == hashlib.sha256(artifact.diff.encode()).hexdigest()
     assert artifact.request.targets[0].package == "lodash"
 
@@ -88,6 +88,19 @@ def test_verified_artifact_rejects_tampered_diff() -> None:
     payload["diff"] = "tampered"
 
     with pytest.raises(ValidationError, match="does not match"):
+        VerifiedUpdateArtifact.model_validate(payload)
+
+
+def test_verified_artifact_rejects_the_previous_schema() -> None:
+    artifact = VerifiedUpdateArtifact.from_attempt(
+        project=_project(),
+        request=_request(),
+        attempt=_attempt(),
+    )
+    payload = artifact.model_dump()
+    payload["schema_version"] = 1
+
+    with pytest.raises(ValidationError, match="schema_version"):
         VerifiedUpdateArtifact.model_validate(payload)
 
 
@@ -133,5 +146,5 @@ def test_target_verification_rejects_contradictory_success_state() -> None:
             versions_before=["4.17.20"],
             versions_after=["4.17.20"],
             satisfied=True,
-            outcome="constraint_mismatch",
+            outcome="version_mismatch",
         )

@@ -17,7 +17,6 @@ from bumpire.models import (
     ProjectState,
     TargetVerification,
     UpdateRequest,
-    VersionRequirement,
 )
 
 
@@ -39,7 +38,7 @@ class SuccessfulExecutor:
                 TargetVerification(
                     target=request.targets[0],
                     versions_before=["4.17.20"],
-                    versions_after=[request.targets[0].requirement.version],
+                    versions_after=[request.targets[0].version],
                     satisfied=True,
                     outcome="satisfied",
                 )
@@ -58,7 +57,7 @@ def _project() -> ProjectState:
         ecosystem="npm",
         package_manager="npm",
         lockfile_path="package-lock.json",
-        target_locked_versions={"lodash": ["4.17.20"]},
+        target_resolved_versions={"lodash": ["4.17.20"]},
         manifest_documents={"package.json": manifest},
     )
 
@@ -69,7 +68,7 @@ def _request() -> UpdateRequest:
         targets=[
             DependencyTarget(
                 package="lodash",
-                requirement=VersionRequirement(version="4.18.1"),
+                version="4.18.1",
             )
         ],
     )
@@ -121,7 +120,7 @@ class AlreadySatisfiedExecutor:
             ecosystem=request.ecosystem,
             package_manager="npm",
             lockfile_path="package-lock.json",
-            target_locked_versions={"lodash": ["4.18.1"]},
+            target_resolved_versions={"lodash": ["4.18.1"]},
             manifest_documents={"package.json": "{}"},
         )
 

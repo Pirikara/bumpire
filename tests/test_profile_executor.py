@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from bumpire.events import EventLogger
-from bumpire.models import DependencyTarget, UpdateRequest, VersionRequirement
+from bumpire.models import DependencyTarget, UpdateRequest
 from bumpire.profile import detect_profile
 from bumpire.profile_executor import ProfileExecutor
 
@@ -52,19 +52,27 @@ def _request() -> UpdateRequest:
         targets=[
             DependencyTarget(
                 package="lodash",
-                requirement=VersionRequirement(version="4.18.1"),
+                version="4.18.1",
             )
         ],
     )
 
 
-def test_inspection_binds_project_state_to_repository_head(tmp_path: Path) -> None:
+def test_inspection_binds_project_state_to_repository_head(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     repo = _npm_repo(tmp_path)
     executor = ProfileExecutor(
         repo,
         ".",
         EventLogger(stream=StringIO()),
         detect_profile(repo, "."),
+    )
+    monkeypatch.setattr(
+        executor,
+        "_resolved_versions",
+        lambda sandbox, request: {"lodash": ["4.17.20"]},
     )
 
     project = executor.inspect(_request())
@@ -74,7 +82,10 @@ def test_inspection_binds_project_state_to_repository_head(tmp_path: Path) -> No
     assert project.workspace == "."
 
 
-def test_inspection_rejects_a_dirty_working_tree(tmp_path: Path) -> None:
+def test_inspection_rejects_a_dirty_working_tree(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     repo = _npm_repo(tmp_path)
     (repo / "notes.txt").write_text("untracked\n", encoding="utf-8")
     executor = ProfileExecutor(
@@ -82,6 +93,11 @@ def test_inspection_rejects_a_dirty_working_tree(tmp_path: Path) -> None:
         ".",
         EventLogger(stream=StringIO()),
         detect_profile(repo, "."),
+    )
+    monkeypatch.setattr(
+        executor,
+        "_resolved_versions",
+        lambda sandbox, request: {"lodash": ["4.17.20"]},
     )
 
     with pytest.raises(ValueError, match="clean working tree"):

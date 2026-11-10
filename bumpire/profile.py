@@ -38,10 +38,49 @@ class ManifestPolicy(BaseModel):
         return self
 
 
+class ResolvedGraph(BaseModel):
+    """Package-manager-neutral output produced by a trusted driver extractor."""
+
+    schema_version: Literal[1] = 1
+    packages: dict[str, list[str]]
+
+    @field_validator("packages")
+    @classmethod
+    def valid_packages(cls, value: dict[str, list[str]]) -> dict[str, list[str]]:
+        normalized: dict[str, list[str]] = {}
+        for package, versions in value.items():
+            name = package.strip()
+            if not name or any(character in name for character in ("\n", "\r", "\x00")):
+                raise ValueError("resolved package names must be non-empty single-line values")
+            clean_versions: list[str] = []
+            for version in versions:
+                clean = version.strip()
+                if not clean or any(
+                    character in clean for character in ("\n", "\r", "\x00")
+                ):
+                    raise ValueError(
+                        "resolved versions must be non-empty single-line values"
+                    )
+                clean_versions.append(clean)
+            normalized[name] = sorted(set(clean_versions))
+        return normalized
+
+    def for_targets(self, targets: list[str]) -> dict[str, list[str]]:
+        expected = set(targets)
+        actual = set(self.packages)
+        if actual != expected:
+            missing = sorted(expected - actual)
+            unexpected = sorted(actual - expected)
+            raise ValueError(
+                "resolved graph does not match requested targets: "
+                f"missing={missing}, unexpected={unexpected}"
+            )
+        return {target: self.packages[target] for target in targets}
+
+
 class PackageManagerProfile(BaseModel):
     name: str
     ecosystem: str
-    version_scheme: Literal["semver", "rubygems"]
     detect_all: list[str] = Field(min_length=1)
     manifest_globs: list[str] = Field(min_length=1)
     lockfiles: list[str] = Field(min_length=1)
@@ -50,8 +89,8 @@ class PackageManagerProfile(BaseModel):
     runtime_version_sources: list[VersionSource] = Field(default_factory=list)
     default_manager_version: str = ""
     manager_version_sources: list[VersionSource] = Field(default_factory=list)
-    resolver_script: str
-    locked_version_pattern: str
+    resolve_script: str
+    resolved_graph_script: str
     instructions: str
     manifest_policy: ManifestPolicy
 
@@ -110,12 +149,12 @@ class PackageManagerProfile(BaseModel):
             raise ValueError(f"unsafe runtime version in profile input: {version!r}")
         return self.image_template.format(runtime_version=version)
 
-    def locked_versions(self, lock_text: str, package: str) -> list[str]:
-        pattern = self.locked_version_pattern.replace("{package}", re.escape(package))
-        return [
-            match.group("version")
-            for match in re.finditer(pattern, lock_text, re.MULTILINE | re.DOTALL)
-        ]
+    def parse_resolved_graph(self, output: str, targets: list[str]) -> dict[str, list[str]]:
+        try:
+            graph = ResolvedGraph.model_validate_json(output)
+        except ValueError as exc:
+            raise ValueError(f"driver returned an invalid resolved graph: {exc}") from exc
+        return graph.for_targets(targets)
 
     def validate_manifest_replacement(self, original: str, replacement: str) -> None:
         if self.manifest_policy.kind == "json-sections":
