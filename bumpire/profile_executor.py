@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path, PurePosixPath
 from typing import Literal
 
@@ -9,7 +10,6 @@ from bumpire.docker_runtime import ContainerCommand
 from bumpire.events import EventLogger
 from bumpire.models import (
     AttemptResult,
-    DependencyTarget,
     FileFixPlan,
     ProjectState,
     TargetVerification,
@@ -18,7 +18,6 @@ from bumpire.models import (
 from bumpire.process import run_command
 from bumpire.profile import PackageManagerProfile
 from bumpire.sandbox import GitSandbox
-from bumpire.versions import VersionComparisonError, satisfies
 
 _MAX_CONTEXT_BYTES = 1_000_000
 
@@ -60,11 +59,18 @@ class ProfileExecutor:
                 raise ValueError("dependency manifest context exceeds 1 MB")
             documents[path.relative_to(workdir).as_posix()] = content
 
-        target_versions = self._locked_versions_by_target(workdir, request)
+        with GitSandbox(
+            self.repo,
+            self.workspace,
+            self.events,
+            backend=self.sandbox_backend,
+            base_commit=base_commit,
+        ) as sandbox:
+            assert sandbox.workdir is not None
+            target_versions = self._resolved_versions(sandbox, request)
         missing = sorted(package for package, versions in target_versions.items() if not versions)
         if missing:
-            raise ValueError(f"target packages not found in lockfile: {missing}")
-        self._validate_comparable_versions(request, target_versions)
+            raise ValueError(f"target packages not found in resolved graph: {missing}")
         confirmed_commit, confirmed_ref = self._repository_state()
         if (confirmed_commit, confirmed_ref) != (base_commit, base_ref):
             raise ValueError("repository HEAD changed while dependency state was being inspected")
@@ -73,7 +79,7 @@ class ProfileExecutor:
             f"Detected {self.profile.name} through declarative package-manager profile",
         )
         self.events.emit("manifest", f"Loaded {len(documents)} allowed dependency manifests")
-        self.events.emit("lockfile", f"Checking {self.profile.name} lockfile versions")
+        self.events.emit("lockfile", f"Read {self.profile.name} resolved dependency graph")
         return ProjectState(
             base_commit=base_commit,
             base_ref=base_ref,
@@ -81,7 +87,7 @@ class ProfileExecutor:
             ecosystem=self.ecosystem,
             package_manager=self.profile.name,
             lockfile_path=self.profile.lockfiles[0],
-            target_locked_versions=target_versions,
+            target_resolved_versions=target_versions,
             manifest_documents=documents,
             profile_instructions=self.profile.instructions,
         )
@@ -102,7 +108,7 @@ class ProfileExecutor:
             base_commit=base_commit,
         ) as sandbox:
             assert sandbox.workdir is not None
-            before = self._locked_versions_by_target(sandbox.workdir, request)
+            before = self._resolved_versions(sandbox, request)
             edited_paths: list[str] = []
             try:
                 for replacement in plan.files:
@@ -142,12 +148,12 @@ class ProfileExecutor:
                     stderr=staged_manifest.stderr,
                 )
 
-            self.events.emit("resolve", f"Running {self.profile.name} profile resolver")
+            self.events.emit("resolve", f"Running {self.profile.name} driver resolver")
             resolved = sandbox.package_command(
                 ["false"],
                 container=ContainerCommand(
                     image=self.profile.image(sandbox.workdir),
-                    args=("sh", "-ceu", self.profile.resolver_script, "bumpire-profile"),
+                    args=("sh", "-ceu", self.profile.resolve_script, "bumpire-driver"),
                     environment={
                         "BUMPIRE_MANAGER_VERSION": self.profile.manager_version(sandbox.workdir),
                     },
@@ -165,7 +171,18 @@ class ProfileExecutor:
                     stderr=resolved.stderr,
                 )
 
-            after = self._locked_versions_by_target(sandbox.workdir, request)
+            try:
+                after = self._resolved_versions(sandbox, request)
+            except ValueError as exc:
+                return AttemptResult(
+                    number=attempt_number,
+                    plan=plan,
+                    success=False,
+                    phase="verification",
+                    error=str(exc),
+                    stdout=resolved.stdout,
+                    stderr=resolved.stderr,
+                )
             target_verifications = self.evaluate_targets(request, before, after)
             failed_targets = [
                 verification.target.package
@@ -178,7 +195,10 @@ class ProfileExecutor:
                     plan=plan,
                     success=False,
                     phase="verification",
-                    error=f"targets did not satisfy their version policies: {failed_targets}",
+                    error=(
+                        "targets did not resolve to their exact requested versions: "
+                        f"{failed_targets}"
+                    ),
                     stdout=resolved.stdout,
                     stderr=resolved.stderr,
                     target_verifications=target_verifications,
@@ -260,25 +280,34 @@ class ProfileExecutor:
         base_ref = branch.stdout.strip() if branch.ok else None
         return commit.stdout.strip(), base_ref
 
-    def _locked_versions(self, workdir: Path, package: str) -> list[str]:
-        versions: list[str] = []
-        for relative in self.profile.lockfiles:
-            path = workdir / relative
-            if path.is_file():
-                versions.extend(
-                    self.profile.locked_versions(path.read_text(encoding="utf-8"), package)
-                )
-        return versions
-
-    def _locked_versions_by_target(
+    def _resolved_versions(
         self,
-        workdir: Path,
+        sandbox: GitSandbox,
         request: UpdateRequest,
     ) -> dict[str, list[str]]:
-        return {
-            target.package: self._locked_versions(workdir, target.package)
-            for target in request.targets
-        }
+        assert sandbox.workdir is not None
+        targets = [target.package for target in request.targets]
+        self.events.emit("graph", f"Reading resolved graph through {self.profile.name} driver")
+        result = sandbox.package_command(
+            ["false"],
+            container=ContainerCommand(
+                image=self.profile.image(sandbox.workdir),
+                args=(
+                    "sh",
+                    "-ceu",
+                    self.profile.resolved_graph_script,
+                    "bumpire-driver",
+                ),
+                environment={"BUMPIRE_TARGETS_JSON": json.dumps(targets)},
+                network="none",
+                writable_workspace=False,
+            ),
+            timeout=120,
+        )
+        if not result.ok:
+            detail = result.stderr or result.stdout
+            raise ValueError(f"{self.profile.name} driver could not read resolved graph: {detail}")
+        return self.profile.parse_resolved_graph(result.stdout, targets)
 
     def request_is_satisfied(
         self,
@@ -288,7 +317,7 @@ class ProfileExecutor:
         for target in request.targets:
             current_versions = versions.get(target.package, [])
             if not current_versions or not all(
-                self._satisfies(version, target) for version in current_versions
+                version == target.version for version in current_versions
             ):
                 return False
         return True
@@ -303,21 +332,15 @@ class ProfileExecutor:
         for target in request.targets:
             versions_before = before.get(target.package, [])
             versions_after = after.get(target.package, [])
-            error: str | None = None
             if not versions_before:
                 satisfied = False
-                outcome = "missing"
+                outcome = "missing_before"
             elif not versions_after:
-                satisfied = target.allow_removal
-                outcome = "removed" if satisfied else "removal_disallowed"
+                satisfied = False
+                outcome = "missing_after"
             else:
-                try:
-                    satisfied = all(self._satisfies(version, target) for version in versions_after)
-                    outcome = "satisfied" if satisfied else "constraint_mismatch"
-                except VersionComparisonError as exc:
-                    satisfied = False
-                    outcome = "invalid_version"
-                    error = str(exc)
+                satisfied = all(version == target.version for version in versions_after)
+                outcome = "satisfied" if satisfied else "version_mismatch"
             verifications.append(
                 TargetVerification(
                     target=target,
@@ -325,30 +348,12 @@ class ProfileExecutor:
                     versions_after=versions_after,
                     satisfied=satisfied,
                     outcome=outcome,
-                    error=error,
                 )
             )
         return verifications
 
     def _repo_path(self, path: str) -> str:
         return str(PurePosixPath(self.workspace) / PurePosixPath(path))
-
-    def _satisfies(self, actual: str, target: DependencyTarget) -> bool:
-        return satisfies(actual, target.requirement, self.profile.version_scheme)
-
-    def _validate_comparable_versions(
-        self,
-        request: UpdateRequest,
-        versions: dict[str, list[str]],
-    ) -> None:
-        try:
-            for target in request.targets:
-                for version in versions[target.package]:
-                    self._satisfies(version, target)
-        except VersionComparisonError as exc:
-            raise ValueError(
-                f"profile {self.profile.name} cannot evaluate the requested version policy: {exc}"
-            ) from exc
 
     @staticmethod
     def _preserve_final_newline(original: str, replacement: str) -> str:

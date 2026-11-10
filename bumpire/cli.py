@@ -18,7 +18,6 @@ from bumpire.models import (
     UpdateRequest,
     UpdateResult,
     VerifiedUpdateArtifact,
-    VersionRequirement,
 )
 from bumpire.profile import detect_profile
 from bumpire.profile_executor import ProfileExecutor
@@ -57,18 +56,9 @@ def _add_update_arguments(command: argparse.ArgumentParser) -> None:
         "--target",
         action="append",
         nargs=2,
-        metavar=("PACKAGE", "REQUIREMENT"),
-        help="add an exact version or an explicit >= version policy to the atomic update",
+        metavar=("PACKAGE", "VERSION"),
+        help="add an exact package version to the atomic update",
     )
-    command.add_argument(
-        "--allow-removal",
-        action="append",
-        default=[],
-        metavar="PACKAGE",
-        help="allow a requested package to disappear from the resolved dependency graph",
-    )
-    command.add_argument("--package", help="single-target compatibility option")
-    command.add_argument("--safe-version", help="single-target compatibility option")
     command.add_argument("--model", default=os.environ.get("BUMPIRE_MODEL", ""))
     command.add_argument("--api-base", default=os.environ.get("BUMPIRE_API_BASE"))
     command.add_argument(
@@ -179,7 +169,7 @@ def _repository(args: argparse.Namespace) -> Path:
 
 
 def _validate_artifact_publish_args(args: argparse.Namespace) -> None:
-    if args.target or args.package or args.safe_version or args.allow_removal:
+    if args.target:
         raise ValueError("--artifact-input cannot be combined with update target options")
 
 
@@ -194,7 +184,7 @@ def _write_outputs(args: argparse.Namespace, result: UpdateResult) -> None:
 
 def _print_already_satisfied(result: UpdateResult) -> None:
     packages = ", ".join(target.package for target in result.request.targets)
-    print(f"All requested targets already satisfy their policies: {packages}")
+    print(f"All requested targets already resolve to their exact versions: {packages}")
 
 
 def _print_failed_update(result: UpdateResult) -> None:
@@ -225,60 +215,26 @@ def _update_exit_code(result: UpdateResult) -> int:
 
 
 def _request(args: argparse.Namespace, ecosystem: str) -> UpdateRequest:
-    batch_targets = args.target or []
-    uses_compatibility_options = bool(args.package or args.safe_version)
-    if batch_targets and uses_compatibility_options:
-        raise ValueError("--target cannot be combined with --package or --safe-version")
-    if batch_targets:
-        targets = [
-            DependencyTarget(
-                package=package,
-                requirement=_requirement(requirement),
-                allow_removal=package in args.allow_removal,
-            )
-            for package, requirement in batch_targets
-        ]
-        _validate_removal_packages(args.allow_removal, targets)
-        return UpdateRequest(
-            ecosystem=ecosystem,
-            targets=targets,
-        )
-    if bool(args.package) != bool(args.safe_version):
-        raise ValueError("--package and --safe-version must be supplied together")
-    if not args.package:
-        raise ValueError("supply at least one --target, or --package with --safe-version")
-    targets = [
-        DependencyTarget(
-            package=args.package,
-            requirement=VersionRequirement(kind="at_least", version=args.safe_version),
-            allow_removal=args.package in args.allow_removal,
-        )
-    ]
-    _validate_removal_packages(args.allow_removal, targets)
+    if not args.target:
+        raise ValueError("supply at least one --target PACKAGE VERSION")
     return UpdateRequest(
         ecosystem=ecosystem,
-        targets=targets,
+        targets=[
+            DependencyTarget(package=package, version=_exact_version(version))
+            for package, version in args.target
+        ],
     )
 
 
-def _requirement(value: str) -> VersionRequirement:
+def _exact_version(value: str) -> str:
     value = value.strip()
     if value.startswith("=="):
-        return VersionRequirement(kind="exact", version=value[2:])
-    if value.startswith(">="):
-        return VersionRequirement(kind="at_least", version=value[2:])
+        value = value[2:].strip()
     if value.startswith(("=", ">", "<", "!", "~", "^")):
-        raise ValueError("version requirements support only exact versions, ==, or >=")
-    return VersionRequirement(kind="exact", version=value)
-
-
-def _validate_removal_packages(
-    packages: list[str],
-    targets: list[DependencyTarget],
-) -> None:
-    unknown = sorted(set(packages) - {target.package for target in targets})
-    if unknown:
-        raise ValueError(f"--allow-removal names packages that are not targets: {unknown}")
+        raise ValueError("--target accepts only an exact version (optionally prefixed by ==)")
+    if not value:
+        raise ValueError("--target version must not be empty")
+    return value
 
 
 def _api_key(args: argparse.Namespace) -> str | None:

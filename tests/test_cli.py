@@ -30,45 +30,18 @@ def test_repeated_targets_form_one_batch() -> None:
     )
 
     assert [target.package for target in request.targets] == ["rails", "activestorage"]
-    assert all(target.requirement.version == "7.2.3.2" for target in request.targets)
-    assert all(target.requirement.kind == "exact" for target in request.targets)
+    assert all(target.version == "7.2.3.2" for target in request.targets)
 
 
-def test_explicit_minimum_requirement_is_parsed() -> None:
-    request = _request(_parse("--target", "lodash", ">=4.18.1"), "npm")
+def test_explicit_exact_prefix_is_accepted() -> None:
+    request = _request(_parse("--target", "lodash", "==4.18.1"), "npm")
 
-    assert request.targets[0].requirement.kind == "at_least"
-    assert request.targets[0].requirement.version == "4.18.1"
-
-
-def test_single_target_compatibility_options_remain_supported() -> None:
-    request = _request(
-        _parse(
-            "--package",
-            "lodash",
-            "--safe-version",
-            "4.18.1",
-        ),
-        "npm",
-    )
-
-    assert request.targets[0].package == "lodash"
-    assert request.targets[0].requirement.kind == "at_least"
+    assert request.targets[0].version == "4.18.1"
 
 
-def test_batch_and_compatibility_options_cannot_be_mixed() -> None:
-    args = _parse(
-        "--target",
-        "lodash",
-        "4.18.1",
-        "--package",
-        "lodash",
-        "--safe-version",
-        "4.18.1",
-    )
-
-    with pytest.raises(ValueError, match="cannot be combined"):
-        _request(args, "npm")
+def test_target_is_required() -> None:
+    with pytest.raises(ValueError, match="at least one"):
+        _request(_parse(), "npm")
 
 
 def test_duplicate_batch_package_is_rejected() -> None:
@@ -78,14 +51,7 @@ def test_duplicate_batch_package_is_rejected() -> None:
         _request(args, "npm")
 
 
-def test_removal_must_name_a_requested_package() -> None:
-    args = _parse("--target", "lodash", "4.18.1", "--allow-removal", "rails")
-
-    with pytest.raises(ValueError, match="not targets"):
-        _request(args, "npm")
-
-
-@pytest.mark.parametrize("requirement", ["^4.18.1", "!=4.18.1", "<5.0.0"])
-def test_unsupported_requirement_operator_is_rejected(requirement: str) -> None:
-    with pytest.raises(ValueError, match="support only"):
-        _request(_parse("--target", "lodash", requirement), "npm")
+@pytest.mark.parametrize("version", [">=4.18.1", "^4.18.1", "!=4.18.1", "<5.0.0"])
+def test_version_policy_operators_are_rejected(version: str) -> None:
+    with pytest.raises(ValueError, match="only an exact version"):
+        _request(_parse("--target", "lodash", version), "npm")

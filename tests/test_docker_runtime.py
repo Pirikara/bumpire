@@ -49,3 +49,23 @@ def test_docker_command_rejects_unsafe_image(tmp_path) -> None:
             clone_root=clone,
             workspace=PurePosixPath("."),
         )
+
+
+def test_graph_extractor_can_run_without_network_or_workspace_writes(tmp_path) -> None:
+    clone = tmp_path / "repository"
+    (clone / ".git").mkdir(parents=True)
+
+    args = DockerRuntime.build_command(
+        ContainerCommand(
+            image="node:22-bookworm-slim",
+            args=("node", "extract.js"),
+            network="none",
+            writable_workspace=False,
+        ),
+        clone_root=clone,
+        workspace=PurePosixPath("."),
+    )
+
+    assert args[args.index("--network") + 1] == "none"
+    assert f"type=bind,src={clone.resolve()},dst=/workspace,readonly" in args
+    assert f"type=bind,src={(clone / '.git').resolve()},dst=/workspace/.git,readonly" not in args

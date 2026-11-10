@@ -9,27 +9,13 @@ from typing import Literal
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 
-class VersionRequirement(BaseModel):
-    kind: Literal["exact", "at_least"] = "exact"
-    version: str
-
-    @field_validator("version")
-    @classmethod
-    def non_empty_single_line(cls, value: str) -> str:
-        value = value.strip()
-        if not value or "\n" in value or "\r" in value or "\x00" in value:
-            raise ValueError("must be a non-empty single-line value")
-        return value
-
-
 class DependencyTarget(BaseModel):
     package: str
-    requirement: VersionRequirement
-    allow_removal: bool = False
+    version: str
 
-    @field_validator("package")
+    @field_validator("package", "version")
     @classmethod
-    def non_empty_package(cls, value: str) -> str:
+    def non_empty_single_line(cls, value: str) -> str:
         value = value.strip()
         if not value or "\n" in value or "\r" in value or "\x00" in value:
             raise ValueError("must be a non-empty single-line value")
@@ -107,7 +93,7 @@ class ProjectState(BaseModel):
     ecosystem: str
     package_manager: str
     lockfile_path: str
-    target_locked_versions: dict[str, list[str]]
+    target_resolved_versions: dict[str, list[str]]
     manifest_documents: dict[str, str] = Field(default_factory=dict)
     profile_instructions: str | None = None
 
@@ -148,36 +134,25 @@ class TargetVerification(BaseModel):
     satisfied: bool
     outcome: Literal[
         "satisfied",
-        "removed",
-        "removal_disallowed",
-        "constraint_mismatch",
-        "missing",
-        "invalid_version",
+        "version_mismatch",
+        "missing_before",
+        "missing_after",
     ]
-    error: str | None = None
 
     @model_validator(mode="after")
     def internally_consistent(self) -> TargetVerification:
-        successful_outcome = self.outcome in {"satisfied", "removed"}
-        if self.satisfied != successful_outcome:
+        if self.satisfied != (self.outcome == "satisfied"):
             raise ValueError("target verification outcome contradicts satisfied state")
-        if self.outcome == "removed":
-            if not self.target.allow_removal:
-                raise ValueError("target removal was not permitted")
+        if self.outcome == "missing_before":
+            if self.versions_before:
+                raise ValueError("missing_before requires no versions before the update")
+        elif self.outcome == "missing_after":
             if not self.versions_before or self.versions_after:
-                raise ValueError("removed outcome requires versions only before the update")
-        elif self.outcome == "removal_disallowed":
-            if self.target.allow_removal:
-                raise ValueError("removal_disallowed contradicts the target policy")
-            if not self.versions_before or self.versions_after:
-                raise ValueError("removal_disallowed requires versions only before the update")
-        elif self.outcome in {"satisfied", "constraint_mismatch", "invalid_version"}:
-            if not self.versions_before or not self.versions_after:
-                raise ValueError(f"{self.outcome} requires versions before and after the update")
-        if self.outcome == "invalid_version" and not self.error:
-            raise ValueError("invalid_version requires comparison error evidence")
-        if self.outcome != "invalid_version" and self.error is not None:
-            raise ValueError("comparison error evidence is only valid for invalid_version")
+                raise ValueError("missing_after requires versions only before the update")
+        elif self.outcome in {"satisfied", "version_mismatch"} and (
+            not self.versions_before or not self.versions_after
+        ):
+            raise ValueError(f"{self.outcome} requires versions before and after the update")
         return self
 
 
@@ -195,7 +170,7 @@ class AttemptResult(BaseModel):
 
 
 class VerifiedUpdateArtifact(BaseModel):
-    schema_version: Literal[1] = 1
+    schema_version: Literal[2] = 2
     base_commit: str
     base_ref: str | None = None
     workspace: str

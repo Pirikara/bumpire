@@ -8,6 +8,7 @@ import shutil
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
+from typing import Literal
 
 from bumpire.events import EventLogger
 from bumpire.process import CommandResult, run_command
@@ -21,6 +22,8 @@ class ContainerCommand:
     image: str
     args: tuple[str, ...]
     environment: dict[str, str] = field(default_factory=dict)
+    network: Literal["bridge", "none"] = "bridge"
+    writable_workspace: bool = True
 
 
 class DockerRuntime:
@@ -59,7 +62,7 @@ class DockerRuntime:
         )
         self.events.emit(
             "container",
-            f"Running resolver in Docker image {command.image}",
+            f"Running trusted driver command in Docker image {command.image}",
             read_only_root=True,
             capabilities="none",
         )
@@ -82,6 +85,8 @@ class DockerRuntime:
     ) -> list[str]:
         if not _IMAGE.fullmatch(command.image):
             raise ValueError(f"unsafe Docker image reference: {command.image!r}")
+        if command.network not in {"bridge", "none"}:
+            raise ValueError(f"unsafe Docker network mode: {command.network!r}")
         if workspace.is_absolute() or ".." in workspace.parts:
             raise ValueError("unsafe Docker workspace")
         clone_root = clone_root.resolve()
@@ -112,15 +117,24 @@ class DockerRuntime:
             "--cpus",
             "2",
             "--network",
-            "bridge",
+            command.network,
             "--user",
             f"{uid}:{gid}",
             "--tmpfs",
             "/tmp:rw,nosuid,nodev,size=512m",
             "--mount",
-            f"type=bind,src={clone_root},dst=/workspace",
-            "--mount",
-            f"type=bind,src={git_metadata},dst=/workspace/.git,readonly",
+            (
+                f"type=bind,src={clone_root},dst=/workspace"
+                + ("" if command.writable_workspace else ",readonly")
+            ),
+            *(
+                [
+                    "--mount",
+                    f"type=bind,src={git_metadata},dst=/workspace/.git,readonly",
+                ]
+                if command.writable_workspace
+                else []
+            ),
             "--workdir",
             container_workdir.as_posix(),
             "--env",

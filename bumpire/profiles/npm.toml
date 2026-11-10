@@ -1,20 +1,19 @@
 name = "npm"
 ecosystem = "npm"
-version_scheme = "semver"
 detect_all = ["package.json", "package-lock.json"]
 manifest_globs = ["package.json", "**/package.json"]
 lockfiles = ["package-lock.json"]
 image_template = "node:{runtime_version}-bookworm-slim"
 default_runtime_version = "22"
 default_manager_version = ""
-locked_version_pattern = '"(?:[^"]*/)?node_modules/{package}"\s*:\s*\{[^{}]*?"version"\s*:\s*"(?P<version>[^"]+)"'
 instructions = """
 Edit package.json dependency fields only. Preserve unrelated metadata and formatting as
 closely as possible. For a local package peer conflict, update the root dependency and
 the local package's peerDependencies together. Never edit package-lock.json directly;
-the resolver owns it. Satisfy every requested version policy as one coherent update.
+the resolver owns it. Resolve every target to its exact requested version as one coherent
+update.
 """
-resolver_script = '''
+resolve_script = '''
 mkdir -p "$HOME" /tmp/npm-cache
 export npm_config_cache=/tmp/npm-cache
 export npm_config_update_notifier=false
@@ -23,6 +22,47 @@ if [ -n "${BUMPIRE_MANAGER_VERSION:-}" ]; then
   export PATH="/tmp/npm-global/bin:$PATH"
 fi
 npm install --package-lock-only --ignore-scripts --no-audit --no-fund
+'''
+resolved_graph_script = '''
+node <<'NODE'
+const fs = require("fs");
+
+const targets = JSON.parse(process.env.BUMPIRE_TARGETS_JSON || "[]");
+if (!Array.isArray(targets) || targets.some((name) => typeof name !== "string")) {
+  throw new Error("BUMPIRE_TARGETS_JSON must be an array of package names");
+}
+const versions = Object.fromEntries(targets.map((name) => [name, new Set()]));
+const record = (name, version) => {
+  if (Object.hasOwn(versions, name) && typeof version === "string" && version.length > 0) {
+    versions[name].add(version);
+  }
+};
+const walkDependencies = (dependencies) => {
+  if (!dependencies || typeof dependencies !== "object") return;
+  for (const [name, dependency] of Object.entries(dependencies)) {
+    if (!dependency || typeof dependency !== "object") continue;
+    record(name, dependency.version);
+    walkDependencies(dependency.dependencies);
+  }
+};
+
+const lock = JSON.parse(fs.readFileSync("package-lock.json", "utf8"));
+if (lock.packages && typeof lock.packages === "object") {
+  for (const [path, dependency] of Object.entries(lock.packages)) {
+    const match = path.match(/(?:^|\/)node_modules\/((?:@[^/]+\/)?[^/]+)$/);
+    if (path && dependency && typeof dependency === "object") {
+      const name = typeof dependency.name === "string" ? dependency.name : match?.[1];
+      if (name) record(name, dependency.version);
+    }
+  }
+}
+walkDependencies(lock.dependencies);
+
+const packages = Object.fromEntries(
+  targets.map((name) => [name, [...versions[name]].sort()]),
+);
+process.stdout.write(JSON.stringify({schema_version: 1, packages}));
+NODE
 '''
 
 [manifest_policy]

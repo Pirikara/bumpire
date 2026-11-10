@@ -418,8 +418,7 @@ def publication_title(artifact: VerifiedUpdateArtifact) -> str:
     targets = artifact.request.targets
     if len(targets) == 1:
         target = targets[0]
-        operator = "" if target.requirement.kind == "exact" else ">="
-        return f"Update {target.package} to {operator}{target.requirement.version}"
+        return f"Update {target.package} to {target.version}"
     return f"Update {len(targets)} dependencies with Bumpire"
 
 
@@ -427,12 +426,11 @@ def publication_body(artifact: VerifiedUpdateArtifact) -> str:
     rows = []
     for verification in artifact.target_verifications:
         target = verification.target
-        operator = "==" if target.requirement.kind == "exact" else ">="
         before = ", ".join(verification.versions_before)
-        after = ", ".join(verification.versions_after) or "removed"
+        after = ", ".join(verification.versions_after)
         rows.append(
             f"| `{_markdown(target.package)}` "
-            f"| `{operator}{_markdown(target.requirement.version)}` "
+            f"| `=={_markdown(target.version)}` "
             f"| `{_markdown(before)}` | `{_markdown(after)}` |"
         )
     return "\n".join(
@@ -451,7 +449,7 @@ def publication_body(artifact: VerifiedUpdateArtifact) -> str:
             f"- Patch SHA-256: `{artifact.diff_sha256}`",
             f"- Changed files: {len(artifact.changed_files)}",
             "",
-            "Bumpire verified dependency resolution, requested version policies, and the",
+            "Bumpire verified dependency resolution, exact requested versions, and the",
             "changed-file allowlist. Application compatibility remains the responsibility",
             "of this repository's CI.",
         ]
