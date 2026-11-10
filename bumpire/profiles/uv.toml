@@ -1,0 +1,104 @@
+name = "uv"
+ecosystem = "uv"
+detect_all = ["pyproject.toml", "uv.lock"]
+manifest_globs = ["pyproject.toml", "**/pyproject.toml"]
+lockfiles = ["uv.lock"]
+image_template = "ghcr.io/astral-sh/uv:{manager_version}-python{runtime_version}-trixie-slim"
+default_runtime_version = "3.12"
+default_manager_version = "0.13.7"
+instructions = """
+Edit Python dependency declarations in pyproject.toml only. Preserve project metadata,
+scripts, build configuration, indexes, sources, workspace settings, and unrelated
+dependencies. Coordinate direct requirements, optional dependencies, dependency groups,
+and uv constraint or override dependencies when they block an exact target. Never edit
+uv.lock directly; uv owns it. Resolve every target to its exact requested version as one
+coherent update.
+"""
+resolve_script = '''
+mkdir -p "$HOME" /tmp/uv-cache
+export UV_CACHE_DIR=/tmp/uv-cache
+python - <<'PY'
+import json
+import os
+import subprocess
+
+targets = json.loads(os.environ.get("BUMPIRE_UPDATE_TARGETS_JSON", "[]"))
+if not isinstance(targets, list) or not targets:
+    raise SystemExit("BUMPIRE_UPDATE_TARGETS_JSON must be a non-empty array")
+
+command = ["uv", "lock", "--no-python-downloads"]
+for target in targets:
+    if (
+        not isinstance(target, dict)
+        or not isinstance(target.get("package"), str)
+        or not isinstance(target.get("version"), str)
+    ):
+        raise SystemExit("each update target must contain package and version strings")
+    command.extend(["--upgrade-package", f"{target['package']}=={target['version']}"])
+
+subprocess.run(command, check=True)
+PY
+'''
+resolved_graph_script = '''
+mkdir -p "$HOME" /tmp/uv-cache
+export UV_CACHE_DIR=/tmp/uv-cache
+uv workspace metadata --frozen --offline --no-python-downloads --output-version preview > /tmp/bumpire-uv-metadata.json
+python - <<'PY'
+import json
+import os
+import re
+
+targets = json.loads(os.environ.get("BUMPIRE_TARGETS_JSON", "[]"))
+if not isinstance(targets, list) or any(not isinstance(name, str) for name in targets):
+    raise SystemExit("BUMPIRE_TARGETS_JSON must be an array of package names")
+
+with open("/tmp/bumpire-uv-metadata.json", encoding="utf-8") as stream:
+    metadata = json.load(stream)
+resolution = metadata.get("resolution")
+if not isinstance(resolution, dict):
+    raise SystemExit("uv workspace metadata has no resolution graph")
+
+normalize = lambda name: re.sub(r"[-_.]+", "-", name).lower()
+requested = {}
+for target in targets:
+    requested.setdefault(normalize(target), []).append(target)
+versions = {target: set() for target in targets}
+
+for node in resolution.values():
+    if not isinstance(node, dict) or node.get("kind") != "package":
+        continue
+    name = node.get("name")
+    version = node.get("version")
+    if not isinstance(name, str) or not isinstance(version, str) or not version:
+        continue
+    for target in requested.get(normalize(name), []):
+        versions[target].add(version)
+
+packages = {target: sorted(versions[target]) for target in targets}
+print(json.dumps({"schema_version": 1, "packages": packages}, separators=(",", ":")))
+PY
+'''
+
+[manifest_policy]
+kind = "toml-paths"
+allowed_paths = [
+  "project.dependencies",
+  "project.optional-dependencies",
+  "dependency-groups",
+  "tool.uv.dev-dependencies",
+  "tool.uv.constraint-dependencies",
+  "tool.uv.override-dependencies",
+]
+preserved_toml_item_pattern = '''^\s*(?P<name>[A-Za-z0-9][A-Za-z0-9._-]*)'''
+
+[[runtime_version_sources]]
+path = ".python-version"
+pattern = '^(?P<version>\d+\.\d+)(?:\.\d+)?$'
+
+[[manager_version_sources]]
+path = "uv.toml"
+pattern = '^\s*required-version\s*=\s*"==(?P<version>\d+\.\d+\.\d+)"\s*$'
+
+[[manager_version_sources]]
+path = "pyproject.toml"
+pattern = '^\s*required-version\s*=\s*"==(?P<version>\d+\.\d+\.\d+)"\s*$'

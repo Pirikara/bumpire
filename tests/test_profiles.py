@@ -14,14 +14,16 @@ def _profiles_by_name():
 def test_builtin_profiles_are_declarative_and_complete() -> None:
     profiles = _profiles_by_name()
 
-    assert set(profiles) == {"bun", "bundler", "npm", "pnpm", "yarn"}
+    assert set(profiles) == {"bun", "bundler", "npm", "pnpm", "uv", "yarn"}
     assert "npm install --package-lock-only" in profiles["npm"].resolve_script
     assert "pnpm install --lockfile-only" in profiles["pnpm"].resolve_script
     assert "yarn install" in profiles["yarn"].resolve_script
     assert "bun install --lockfile-only" in profiles["bun"].resolve_script
     assert "bundle lock" in profiles["bundler"].resolve_script
+    assert '"uv", "lock"' in profiles["uv"].resolve_script
     assert "JSON.stringify" in profiles["npm"].resolved_graph_script
     assert "Bundler::LockfileParser" in profiles["bundler"].resolved_graph_script
+    assert "uv workspace metadata" in profiles["uv"].resolved_graph_script
 
 
 @pytest.mark.parametrize(
@@ -120,6 +122,38 @@ BUNDLED WITH
     assert profile.image(tmp_path) == "ruby:3.3.10-slim"
 
 
+def test_uv_profile_extracts_versions_and_discovers_workspace_manifests(
+    tmp_path: Path,
+) -> None:
+    member = tmp_path / "packages" / "member"
+    member.mkdir(parents=True)
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "example"\ndependencies = ["idna>=3.9"]\n',
+        encoding="utf-8",
+    )
+    (member / "pyproject.toml").write_text(
+        '[project]\nname = "member"\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "uv.lock").write_text("version = 1\n", encoding="utf-8")
+    (tmp_path / ".python-version").write_text("3.13.2\n", encoding="utf-8")
+    (tmp_path / "uv.toml").write_text(
+        'required-version = "==0.13.7"\n',
+        encoding="utf-8",
+    )
+
+    profile = detect_profile(tmp_path, ".")
+
+    assert profile.name == "uv"
+    assert profile.runtime_version(tmp_path) == "3.13"
+    assert profile.manager_version(tmp_path) == "0.13.7"
+    assert profile.image(tmp_path) == "ghcr.io/astral-sh/uv:0.13.7-python3.13-trixie-slim"
+    assert [path.relative_to(tmp_path).as_posix() for path in profile.manifest_paths(tmp_path)] == [
+        "packages/member/pyproject.toml",
+        "pyproject.toml",
+    ]
+
+
 def test_driver_protocol_normalizes_resolved_versions() -> None:
     profile = _profiles_by_name()["npm"]
 
@@ -214,6 +248,68 @@ def test_bundler_manifest_policy_allows_gems_but_protects_sources() -> None:
         profile.validate_manifest_replacement(
             original,
             'source "https://rubygems.org"\n\ngem "rails", "7.2.3.2"\n',
+        )
+
+
+def test_uv_manifest_policy_allows_dependencies_but_protects_project_code() -> None:
+    profile = _profiles_by_name()["uv"]
+    original = """[project]
+name = "example"
+dependencies = ["Django==5.1.1", "idna>=3.9"]
+
+[project.scripts]
+example = "example:main"
+
+[dependency-groups]
+dev = ["pytest==8.3.0", { include-group = "lint" }]
+lint = ["ruff==0.11.0"]
+
+[tool.uv]
+constraint-dependencies = ["urllib3<3"]
+
+[[tool.uv.index]]
+url = "https://pypi.org/simple"
+"""
+    dependency_update = """[project]
+name = "example"
+dependencies = ["Django==5.2.1", "idna>=3.9"]
+
+[project.scripts]
+example = "example:main"
+
+[dependency-groups]
+dev = ["pytest==8.4.0", { include-group = "lint" }]
+lint = ["ruff==0.11.0"]
+
+[tool.uv]
+constraint-dependencies = ["urllib3<3"]
+override-dependencies = ["asgiref==3.9.1"]
+
+[[tool.uv.index]]
+url = "https://pypi.org/simple"
+"""
+
+    profile.validate_manifest_replacement(original, dependency_update)
+
+    with pytest.raises(ValueError, match="protected TOML fields"):
+        profile.validate_manifest_replacement(
+            original,
+            dependency_update.replace('example = "example:main"', 'example = "other:main"'),
+        )
+    with pytest.raises(ValueError, match="protected TOML fields"):
+        profile.validate_manifest_replacement(
+            original,
+            dependency_update.replace("https://pypi.org/simple", "https://example.invalid/simple"),
+        )
+    with pytest.raises(ValueError, match="declarations may not be removed"):
+        profile.validate_manifest_replacement(
+            original,
+            dependency_update.replace(', "idna>=3.9"', ""),
+        )
+    with pytest.raises(ValueError, match="declarations may not be removed"):
+        profile.validate_manifest_replacement(
+            original,
+            dependency_update.replace(', { include-group = "lint" }', ""),
         )
 
 
