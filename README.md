@@ -243,7 +243,7 @@ Python adapters.
 | Bundler | `Gemfile` + `Gemfile.lock` | `gem` declaration lines | `bundle lock` | `Bundler::LockfileParser` |
 | uv | `pyproject.toml` + `uv.lock` | PEP 621 dependencies, dependency groups, constraints, and overrides | Exact, batched `uv lock --upgrade-package` | Official `uv workspace metadata` JSON |
 | Poetry | `pyproject.toml` + `poetry.lock` | PEP 621/735 and Poetry dependency tables | Targeted `poetry update --lock` with plugins disabled | Networkless TOML lock reader |
-| PDM | `pyproject.toml` + `pdm.lock` | PEP 621/735, legacy dev groups, and resolution overrides | Per-target exact constraints with `pdm update --no-sync`, then an unconstrained compatibility re-lock | Networkless TOML lock reader |
+| [PDM](https://pdm-project.org/) | `pyproject.toml` + `pdm.lock` | PEP 621/735, legacy dev groups, and resolution overrides | Per-target exact constraints with `pdm update --no-sync`, then an unconstrained compatibility re-lock | Networkless TOML lock reader |
 
 Bun's legacy binary `bun.lockb` is intentionally unsupported; migrate it to the current
 text-based `bun.lock` before using Bumpire. Pin pnpm, Yarn, and Bun with the
