@@ -50,6 +50,9 @@ class ProfileExecutor:
         manifests = self.profile.manifest_paths(workdir)
         if not manifests:
             raise ValueError(f"profile {self.profile.name} found no dependency manifests")
+        lockfiles = self.profile.lockfile_paths(workdir)
+        if not lockfiles:
+            raise ValueError(f"profile {self.profile.name} found no dependency lockfiles")
 
         documents: dict[str, str] = {}
         total_bytes = 0
@@ -87,7 +90,7 @@ class ProfileExecutor:
             workspace=self.workspace,
             ecosystem=self.ecosystem,
             package_manager=self.profile.name,
-            lockfile_path=self.profile.lockfiles[0],
+            lockfile_path=lockfiles[0].relative_to(workdir).as_posix(),
             target_resolved_versions=target_versions,
             manifest_documents=documents,
             profile_instructions=self.profile.instructions,
@@ -110,6 +113,10 @@ class ProfileExecutor:
         ) as sandbox:
             assert sandbox.workdir is not None
             before = self._resolved_versions(sandbox, request)
+            lockfiles_before = {
+                path.relative_to(sandbox.workdir).as_posix()
+                for path in self.profile.lockfile_paths(sandbox.workdir)
+            }
             edited_paths: list[str] = []
             try:
                 for replacement in plan.files:
@@ -208,7 +215,21 @@ class ProfileExecutor:
                     target_verifications=target_verifications,
                 )
 
-            staged = sandbox.stage([*edited_paths, *self.profile.lockfiles])
+            lockfiles_after = {
+                path.relative_to(sandbox.workdir).as_posix()
+                for path in self.profile.lockfile_paths(sandbox.workdir)
+            }
+            resolved_lockfiles = sorted(lockfiles_before | lockfiles_after)
+            if not resolved_lockfiles:
+                return AttemptResult(
+                    number=attempt_number,
+                    plan=plan,
+                    success=False,
+                    phase="review",
+                    error="resolver produced no dependency lockfiles",
+                    target_verifications=target_verifications,
+                )
+            staged = sandbox.stage([*edited_paths, *resolved_lockfiles])
             if not staged.ok:
                 return AttemptResult(
                     number=attempt_number,
@@ -223,7 +244,7 @@ class ProfileExecutor:
             self.events.emit("review", "Reviewing the profile-driven dependency update")
             changed_files = sandbox.changed_files()
             allowed = {self._repo_path(path) for path in edited_paths}
-            allowed.update(self._repo_path(path) for path in self.profile.lockfiles)
+            allowed.update(self._repo_path(path) for path in resolved_lockfiles)
             unexpected = sorted(set(changed_files) - allowed)
             if unexpected:
                 return AttemptResult(
