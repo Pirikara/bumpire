@@ -19,6 +19,7 @@ def test_builtin_profiles_are_declarative_and_complete() -> None:
         "bundler",
         "cargo",
         "composer",
+        "dart-pub",
         "npm",
         "pdm",
         "pip-tools",
@@ -34,6 +35,7 @@ def test_builtin_profiles_are_declarative_and_complete() -> None:
     assert "bundle lock" in profiles["bundler"].resolve_script
     assert "cargo', 'update'" in profiles["cargo"].resolve_script
     assert "'/tmp/composer.phar'" in profiles["composer"].resolve_script
+    assert "override:$package@$version" in profiles["dart-pub"].resolve_script
     assert '"update"' in profiles["poetry"].resolve_script
     assert '"uv", "lock"' in profiles["uv"].resolve_script
     assert "JSON.stringify" in profiles["npm"].resolved_graph_script
@@ -225,6 +227,32 @@ def test_composer_profile_uses_configured_platform_php(tmp_path: Path) -> None:
 
     assert profile.runtime_version(tmp_path) == "8.2"
     assert profile.image(tmp_path) == "php:8.2-cli-alpine"
+
+
+def test_dart_pub_profile_extracts_sdk_version(tmp_path: Path) -> None:
+    (tmp_path / "pubspec.yaml").write_text(
+        "name: example\nenvironment:\n  sdk: '>=3.8.0 <4.0.0'\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "pubspec.lock").write_text("packages: {}\n", encoding="utf-8")
+    (tmp_path / ".dart-version").write_text("3.13.7\n", encoding="utf-8")
+
+    profile = detect_profile(tmp_path, ".")
+
+    assert profile.name == "dart-pub"
+    assert profile.runtime_version(tmp_path) == "3.13.7"
+    assert profile.image(tmp_path) == "dart:3.13.7"
+
+
+def test_dart_pub_profile_rejects_flutter_sdk_projects(tmp_path: Path) -> None:
+    profile = _profiles_by_name()["dart-pub"]
+    (tmp_path / "pubspec.yaml").write_text(
+        "name: example\ndependencies:\n  flutter:\n    sdk: flutter\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="does not include the Flutter SDK"):
+        profile.validate_workspace(tmp_path)
 
 
 def test_uv_profile_extracts_versions_and_discovers_workspace_manifests(
@@ -545,6 +573,62 @@ def test_composer_manifest_policy_allows_only_existing_package_constraints() -> 
         platform_update = json.loads(dependency_update)
         platform_update["require"]["php"] = "^8.3"
         profile.validate_manifest_replacement(original, json.dumps(platform_update))
+
+
+def test_dart_pub_manifest_policy_allows_only_existing_hosted_versions() -> None:
+    profile = _profiles_by_name()["dart-pub"]
+    original = """name: example
+version: 1.0.0
+
+environment:
+  sdk: '>=3.8.0 <4.0.0'
+
+dependencies:
+  http: '>=1.2.0 <=1.3.0'
+  local_package:
+    path: ../local_package
+
+dev_dependencies:
+  lints: ^5.0.0 # keep this comment
+
+dependency_overrides:
+  meta: 1.18.0
+"""
+    dependency_update = original.replace(
+        "http: '>=1.2.0 <=1.3.0'",
+        "http: '1.3.0'",
+    ).replace("lints: ^5.0.0", "lints: ^6.0.0")
+
+    profile.validate_manifest_replacement(original, dependency_update)
+
+    with pytest.raises(ValueError, match="protected YAML fields"):
+        profile.validate_manifest_replacement(
+            original,
+            dependency_update.replace(">=3.8.0 <4.0.0", ">=3.9.0 <4.0.0"),
+        )
+    with pytest.raises(ValueError, match="dependencies may not be added"):
+        profile.validate_manifest_replacement(
+            original,
+            dependency_update.replace(
+                "  http: '1.3.0'",
+                "  http: '1.3.0'\n  collection: ^1.19.0",
+            ),
+        )
+    with pytest.raises(ValueError, match="dependencies may not be removed"):
+        profile.validate_manifest_replacement(
+            original,
+            dependency_update.replace("  http: '1.3.0'\n", ""),
+        )
+    with pytest.raises(ValueError, match="source or selector fields"):
+        profile.validate_manifest_replacement(
+            original,
+            dependency_update.replace("path: ../local_package", "path: ../other_package"),
+        )
+    with pytest.raises(ValueError, match="protected YAML fields"):
+        profile.validate_manifest_replacement(
+            original,
+            dependency_update.replace("meta: 1.18.0", "meta: 1.19.0"),
+        )
 
 
 def test_uv_manifest_policy_allows_dependencies_but_protects_project_code() -> None:

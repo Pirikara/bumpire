@@ -110,6 +110,28 @@ BUNDLED WITH
         },
     ),
     DriverCase(
+        id="dart-pub-lock",
+        profile="dart-pub",
+        files={
+            filename: (Path(__file__).parent / "fixtures" / "dart-pub" / filename).read_text(
+                encoding="utf-8"
+            )
+            for filename in (".dart-version", "pubspec.yaml", "pubspec.lock")
+        },
+        targets=["http", "http_parser", "lints"],
+        expected={"http": ["1.2.0"], "http_parser": ["4.0.2"], "lints": ["5.0.0"]},
+        updates=[
+            {"package": "http", "version": "1.3.0"},
+            {"package": "http_parser", "version": "4.1.2"},
+            {"package": "lints", "version": "6.0.0"},
+        ],
+        expected_after={
+            "http": ["1.3.0"],
+            "http_parser": ["4.1.2"],
+            "lints": ["6.0.0"],
+        },
+    ),
+    DriverCase(
         id="pnpm-v9",
         profile="pnpm",
         files={
@@ -289,6 +311,7 @@ _RESOLVER_CASES = [
         "bun",
         "cargo",
         "composer",
+        "dart-pub",
         "pdm",
         "pip-tools",
         "pnpm",
@@ -570,3 +593,55 @@ def test_composer_resolver_rejects_incompatible_exact_upgrade(tmp_path: Path) ->
     )
 
     assert not result.ok
+
+
+@pytest.mark.driver
+@pytest.mark.skipif(
+    os.environ.get("BUMPIRE_DRIVER_CONFORMANCE") != "1",
+    reason="set BUMPIRE_DRIVER_CONFORMANCE=1 to run Docker driver contracts",
+)
+def test_dart_pub_resolver_does_not_retain_incompatible_override(tmp_path: Path) -> None:
+    profile = {profile.name: profile for profile in load_builtin_profiles()}["dart-pub"]
+    fixture = Path(__file__).parent / "fixtures" / "dart-pub"
+    filenames = (".dart-version", "pubspec.yaml", "pubspec.lock")
+    _write_fixture(
+        tmp_path,
+        {
+            filename: (fixture / filename).read_text(encoding="utf-8")
+            for filename in filenames
+        },
+    )
+
+    result = DockerRuntime(EventLogger(stream=StringIO())).run(
+        ContainerCommand(
+            image=profile.image(tmp_path),
+            args=("sh", "-ceu", profile.resolve_script, "bumpire-driver"),
+            environment={
+                "BUMPIRE_MANAGER_VERSION": profile.manager_version(tmp_path),
+                "BUMPIRE_UPDATE_TARGETS_JSON": json.dumps(
+                    [{"package": "http_parser", "version": "3.1.4"}]
+                ),
+            },
+        ),
+        clone_root=tmp_path,
+        workspace=PurePosixPath("."),
+        timeout=600,
+    )
+
+    assert result.ok, result.stderr or result.stdout
+    graph = DockerRuntime(EventLogger(stream=StringIO())).run(
+        ContainerCommand(
+            image=profile.image(tmp_path),
+            args=("sh", "-ceu", profile.resolved_graph_script, "bumpire-driver"),
+            environment={"BUMPIRE_TARGETS_JSON": '["http_parser"]'},
+            network="none",
+            writable_workspace=False,
+        ),
+        clone_root=tmp_path,
+        workspace=PurePosixPath("."),
+        timeout=120,
+    )
+    assert graph.ok, graph.stderr or graph.stdout
+    assert profile.parse_resolved_graph(graph.stdout, ["http_parser"]) != {
+        "http_parser": ["3.1.4"]
+    }

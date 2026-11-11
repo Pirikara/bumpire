@@ -1,6 +1,6 @@
 [project]
 name = "bumpire"
-version = "0.11.0"
+version = "0.12.0"
 description = "Bumpire: agentic dependency updates with deterministic verification"
 readme = "README.md"
 license = { text = "Apache-2.0" }
