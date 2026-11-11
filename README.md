@@ -175,7 +175,8 @@ uv run bumpire publish \
 
 Use `--workspace path/to/app` for a package nested inside a monorepo. If multiple
 profiles match the same workspace, select one explicitly with `--ecosystem` followed by
-`npm`, `pnpm`, `yarn`, `bun`, `bundler`, `uv`, `poetry`, `pdm`, or `pip-tools`.
+`npm`, `pnpm`, `yarn`, `bun`, `bundler`, `cargo`, `uv`, `poetry`, `pdm`, or
+`pip-tools`.
 
 ## What gets verified
 
@@ -241,6 +242,7 @@ Python adapters.
 | Yarn Classic / Berry | `package.json` + `yarn.lock` | Dependency-related JSON sections | Version-pinned `yarn install` with scripts disabled | Classic and Berry lockfile reader |
 | Bun | `package.json` + `bun.lock` | Dependency-related JSON sections | `bun install --lockfile-only --ignore-scripts` | Bun's native JSONC reader |
 | Bundler | `Gemfile` + `Gemfile.lock` | `gem` declaration lines | `bundle lock` | `Bundler::LockfileParser` |
+| [Cargo](https://doc.rust-lang.org/cargo/) | `Cargo.toml` + `Cargo.lock` | Existing registry dependency versions across workspace and target tables | Per-package `cargo update --precise` using fully qualified package IDs | Networkless registry-package reader for `Cargo.lock` |
 | uv | `pyproject.toml` + `uv.lock` | PEP 621 dependencies, dependency groups, constraints, and overrides | Exact, batched `uv lock --upgrade-package` | Official `uv workspace metadata` JSON |
 | Poetry | `pyproject.toml` + `poetry.lock` | PEP 621/735 and Poetry dependency tables | Targeted `poetry update --lock` with plugins disabled | Networkless TOML lock reader |
 | [PDM](https://pdm-project.org/) | `pyproject.toml` + `pdm.lock` | PEP 621/735, legacy dev groups, and resolution overrides | Per-target exact constraints with `pdm update --no-sync`, then an unconstrained compatibility re-lock | Networkless TOML lock reader |
@@ -259,7 +261,10 @@ all hooks, routes each target through its declared or locked group, and removes 
 exact constraints before the final compatibility resolution. The pip-tools driver orders
 layered inputs before their dependants, supports multiple compiled outputs atomically,
 rejects new direct dependency declarations, and requires every occurrence of a target
-pin to reach the requested version.
+pin to reach the requested version. The Cargo driver supports registry packages, keeps
+git/path sources and dependency selectors immutable, and refuses to add a transitive
+crate as a new direct dependency. If multiple locked registry versions share a crate
+name, each occurrence must converge on the requested version or verification fails.
 
 A driver profile defines:
 
@@ -323,6 +328,7 @@ Bundler then resolves `activestorage` and the other Rails components to `7.2.3.2
 - Poetry updates the lockfile only and disables project plugins; it does not install project dependencies.
 - PDM updates the lockfile with syncing and hooks disabled; it does not install project dependencies.
 - pip-tools compiles lockfiles only; it never runs `pip-sync` or installs project dependencies.
+- Cargo performs lockfile resolution only; it never builds crates or runs build scripts or tests.
 - The agent cannot choose the image, shell command, lockfile, or success condition.
 - Staged, unstaged, and untracked files are all checked against an allowlist.
 - The original repository is never modified.

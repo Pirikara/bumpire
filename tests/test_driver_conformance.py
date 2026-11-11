@@ -62,6 +62,28 @@ BUNDLED WITH
         expected={"nokogiri": ["1.18.10"]},
     ),
     DriverCase(
+        id="cargo-workspace",
+        profile="cargo",
+        files={
+            filename: (Path(__file__).parent / "fixtures" / "cargo" / filename).read_text(
+                encoding="utf-8"
+            )
+            for filename in (
+                "Cargo.toml",
+                "Cargo.lock",
+                "app/Cargo.toml",
+                "app/src/lib.rs",
+            )
+        },
+        targets=["serde_json", "itoa"],
+        expected={"serde_json": ["1.0.138"], "itoa": ["1.0.14"]},
+        updates=[
+            {"package": "serde_json", "version": "1.0.140"},
+            {"package": "itoa", "version": "1.0.15"},
+        ],
+        expected_after={"serde_json": ["1.0.140"], "itoa": ["1.0.15"]},
+    ),
+    DriverCase(
         id="pnpm-v9",
         profile="pnpm",
         files={
@@ -237,7 +259,16 @@ lodash@^4.17.0:
 _RESOLVER_CASES = [
     case
     for case in _CASES
-    if case.profile in {"bun", "pdm", "pip-tools", "pnpm", "poetry", "uv", "yarn"}
+    if case.profile in {
+        "bun",
+        "cargo",
+        "pdm",
+        "pip-tools",
+        "pnpm",
+        "poetry",
+        "uv",
+        "yarn",
+    }
 ]
 
 
@@ -431,6 +462,42 @@ def test_pip_tools_resolver_rejects_incompatible_exact_upgrade(tmp_path: Path) -
                 "BUMPIRE_MANAGER_VERSION": profile.manager_version(tmp_path),
                 "BUMPIRE_UPDATE_TARGETS_JSON": json.dumps(
                     [{"package": "idna", "version": "2.0"}]
+                ),
+            },
+        ),
+        clone_root=tmp_path,
+        workspace=PurePosixPath("."),
+        timeout=600,
+    )
+
+    assert not result.ok
+
+
+@pytest.mark.driver
+@pytest.mark.skipif(
+    os.environ.get("BUMPIRE_DRIVER_CONFORMANCE") != "1",
+    reason="set BUMPIRE_DRIVER_CONFORMANCE=1 to run Docker driver contracts",
+)
+def test_cargo_resolver_rejects_incompatible_exact_upgrade(tmp_path: Path) -> None:
+    profile = {profile.name: profile for profile in load_builtin_profiles()}["cargo"]
+    fixture = Path(__file__).parent / "fixtures" / "cargo"
+    filenames = ("Cargo.toml", "Cargo.lock", "app/Cargo.toml", "app/src/lib.rs")
+    _write_fixture(
+        tmp_path,
+        {
+            filename: (fixture / filename).read_text(encoding="utf-8")
+            for filename in filenames
+        },
+    )
+
+    result = DockerRuntime(EventLogger(stream=StringIO())).run(
+        ContainerCommand(
+            image=profile.image(tmp_path),
+            args=("sh", "-ceu", profile.resolve_script, "bumpire-driver"),
+            environment={
+                "BUMPIRE_MANAGER_VERSION": profile.manager_version(tmp_path),
+                "BUMPIRE_UPDATE_TARGETS_JSON": json.dumps(
+                    [{"package": "itoa", "version": "0.4.8"}]
                 ),
             },
         ),
