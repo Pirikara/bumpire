@@ -17,6 +17,7 @@ def test_builtin_profiles_are_declarative_and_complete() -> None:
     assert set(profiles) == {
         "bun",
         "bundler",
+        "cargo",
         "npm",
         "pdm",
         "pip-tools",
@@ -30,6 +31,7 @@ def test_builtin_profiles_are_declarative_and_complete() -> None:
     assert "yarn install" in profiles["yarn"].resolve_script
     assert "bun install --lockfile-only" in profiles["bun"].resolve_script
     assert "bundle lock" in profiles["bundler"].resolve_script
+    assert "cargo', 'update'" in profiles["cargo"].resolve_script
     assert '"update"' in profiles["poetry"].resolve_script
     assert '"uv", "lock"' in profiles["uv"].resolve_script
     assert "JSON.stringify" in profiles["npm"].resolved_graph_script
@@ -136,6 +138,54 @@ BUNDLED WITH
     assert profile.runtime_version(tmp_path) == "ruby-3.3.10"
     assert profile.manager_version(tmp_path) == "4.0.10"
     assert profile.image(tmp_path) == "ruby:3.3.10-slim"
+
+
+def test_cargo_profile_extracts_toolchain_and_discovers_workspace_manifests(
+    tmp_path: Path,
+) -> None:
+    member = tmp_path / "crates" / "member"
+    member.mkdir(parents=True)
+    (tmp_path / "Cargo.toml").write_text(
+        '[workspace]\nmembers = ["crates/member"]\n',
+        encoding="utf-8",
+    )
+    (member / "Cargo.toml").write_text(
+        '[package]\nname = "member"\nversion = "0.1.0"\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "Cargo.lock").write_text("version = 4\n", encoding="utf-8")
+    (tmp_path / "rust-toolchain.toml").write_text(
+        '[toolchain]\nchannel = "1.99.1"\n',
+        encoding="utf-8",
+    )
+
+    profile = detect_profile(tmp_path, ".")
+
+    assert profile.name == "cargo"
+    assert profile.runtime_version(tmp_path) == "1.99.1"
+    assert profile.manager_version(tmp_path) == "1.99.1"
+    assert profile.image(tmp_path) == "rust:1.99.1-slim"
+    assert [path.relative_to(tmp_path).as_posix() for path in profile.manifest_paths(tmp_path)] == [
+        "Cargo.toml",
+        "crates/member/Cargo.toml",
+    ]
+
+
+@pytest.mark.parametrize("config_name", ["config", "config.toml"])
+def test_cargo_driver_rejects_repository_credential_providers(
+    tmp_path: Path,
+    config_name: str,
+) -> None:
+    profile = _profiles_by_name()["cargo"]
+    config = tmp_path / ".cargo" / config_name
+    config.parent.mkdir()
+    config.write_text(
+        '[registry]\nglobal-credential-providers = ["cargo:token", "cargo:custom"]\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="credential providers"):
+        profile.validate_workspace(tmp_path)
 
 
 def test_uv_profile_extracts_versions_and_discovers_workspace_manifests(
@@ -320,6 +370,86 @@ def test_bundler_manifest_policy_allows_gems_but_protects_sources() -> None:
         profile.validate_manifest_replacement(
             original,
             'source "https://rubygems.org"\n\ngem "rails", "7.2.3.2"\n',
+        )
+
+
+def test_cargo_manifest_policy_allows_only_existing_dependency_versions() -> None:
+    profile = _profiles_by_name()["cargo"]
+    original = """[package]
+name = "example"
+version = "0.1.0"
+rust-version = "1.85"
+
+[dependencies]
+serde = "1.0.210"
+json = { package = "serde_json", version = "1.0.138", features = ["preserve_order"] }
+
+[dev-dependencies]
+tempfile = "3.14.0"
+
+[workspace.dependencies]
+tracing = { version = "0.1.40", default-features = false }
+
+[target.'cfg(unix)'.dependencies]
+libc = { version = "0.2.160", optional = true }
+
+[patch.crates-io]
+itoa = { version = "1.0.14" }
+"""
+    dependency_update = (
+        original.replace('serde = "1.0.210"', 'serde = "1.0.215"')
+        .replace('version = "1.0.138"', 'version = "1.0.140"')
+        .replace('tempfile = "3.14.0"', 'tempfile = "3.15.0"')
+        .replace('version = "0.1.40"', 'version = "0.1.41"')
+        .replace('version = "0.2.160"', 'version = "0.2.161"')
+        .replace('version = "1.0.14"', 'version = "1.0.15"')
+    )
+
+    profile.validate_manifest_replacement(original, dependency_update)
+
+    with pytest.raises(ValueError, match="protected TOML field"):
+        profile.validate_manifest_replacement(
+            original,
+            dependency_update.replace('rust-version = "1.85"', 'rust-version = "1.86"'),
+        )
+    with pytest.raises(ValueError, match="source or selector fields"):
+        profile.validate_manifest_replacement(
+            original,
+            dependency_update.replace(
+                'features = ["preserve_order"]',
+                'features = ["preserve_order", "raw_value"]',
+            ),
+        )
+    with pytest.raises(ValueError, match="declarations may not be removed"):
+        profile.validate_manifest_replacement(
+            original,
+            dependency_update.replace('serde = "1.0.215"\n', ""),
+        )
+    with pytest.raises(ValueError, match="declarations may not be added"):
+        profile.validate_manifest_replacement(
+            original,
+            dependency_update.replace(
+                'serde = "1.0.215"',
+                'serde = "1.0.215"\nregex = "1.11.0"',
+            ),
+        )
+    with pytest.raises(ValueError, match="declarations may not be added"):
+        profile.validate_manifest_replacement(
+            original,
+            dependency_update + '\n[build-dependencies]\ncc = "1.2.0"\n',
+        )
+    with pytest.raises(ValueError, match="source or selector fields"):
+        existing = (
+            'json = { package = "serde_json", version = "1.0.140", '
+            'features = ["preserve_order"] }'
+        )
+        changed = (
+            'json = { package = "serde_json", version = "1.0.140", '
+            'path = "../json", features = ["preserve_order"] }'
+        )
+        profile.validate_manifest_replacement(
+            original,
+            dependency_update.replace(existing, changed),
         )
 
 

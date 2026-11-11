@@ -46,6 +46,7 @@ class ManifestPolicy(BaseModel):
     protected_paths: list[str] = Field(default_factory=list)
     preserved_toml_table_key_paths: list[str] = Field(default_factory=list)
     mutable_toml_table_value_keys: list[str] = Field(default_factory=list)
+    forbid_new_toml_table_keys: bool = False
     preserved_declaration_pattern: str | None = None
     forbid_new_declarations: bool = False
     preserved_toml_item_pattern: str | None = None
@@ -78,6 +79,10 @@ class ManifestPolicy(BaseModel):
         elif self.forbid_new_declarations:
             raise ValueError(
                 "forbid_new_declarations requires preserved_declaration_pattern"
+            )
+        if self.forbid_new_toml_table_keys and not self.preserved_toml_table_key_paths:
+            raise ValueError(
+                "forbid_new_toml_table_keys requires preserved_toml_table_key_paths"
             )
         if self.preserved_toml_item_pattern is not None:
             compiled = re.compile(self.preserved_toml_item_pattern)
@@ -372,9 +377,19 @@ class PackageManagerProfile(BaseModel):
 
         for dotted_pattern in self.manifest_policy.preserved_toml_table_key_paths:
             path_pattern = dotted_pattern.split(".")
-            for path in self._matching_toml_paths(before, path_pattern):
+            table_paths = self._matching_toml_paths(before, path_pattern)
+            if self.manifest_policy.forbid_new_toml_table_keys:
+                table_paths.update(self._matching_toml_paths(after, path_pattern))
+            for path in table_paths:
                 previous = self._nested_value(before, path, missing)
                 proposed = self._nested_value(after, path, missing)
+                if previous is missing:
+                    if isinstance(proposed, dict) and proposed:
+                        raise ValueError(
+                            "dependency declarations may not be added to "
+                            f"{'.'.join(path)}: {sorted(proposed)[:3]}"
+                        )
+                    continue
                 if not isinstance(previous, dict) or not isinstance(proposed, dict):
                     raise ValueError(
                         f"TOML dependency table may not be removed: {'.'.join(path)}"
@@ -384,6 +399,12 @@ class PackageManagerProfile(BaseModel):
                     raise ValueError(
                         "dependency declarations may not be removed from "
                         f"{'.'.join(path)}: {removed[:3]}"
+                    )
+                added = sorted(set(proposed) - set(previous))
+                if self.manifest_policy.forbid_new_toml_table_keys and added:
+                    raise ValueError(
+                        "dependency declarations may not be added to "
+                        f"{'.'.join(path)}: {added[:3]}"
                     )
                 mutable_keys = set(self.manifest_policy.mutable_toml_table_value_keys)
                 for dependency in sorted(set(previous) & set(proposed)):
@@ -398,7 +419,7 @@ class PackageManagerProfile(BaseModel):
                             "dependency source or selector fields may not change for "
                             f"{dependency} in {'.'.join(path)}"
                         )
-                for dependency in sorted(set(proposed) - set(previous)):
+                for dependency in added:
                     if self._protected_toml_value(proposed[dependency], mutable_keys) is not None:
                         raise ValueError(
                             "new dependency must use a registry version constraint: "

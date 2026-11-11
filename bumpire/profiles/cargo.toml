@@ -1,0 +1,172 @@
+name = "cargo"
+ecosystem = "cargo"
+detect_all = ["Cargo.toml", "Cargo.lock"]
+manifest_globs = ["Cargo.toml", "**/Cargo.toml"]
+lockfiles = ["Cargo.lock"]
+image_template = "rust:{runtime_version}-slim"
+default_runtime_version = "1.99.1"
+default_manager_version = "1.99.1"
+instructions = """
+Edit existing registry dependency declarations in Cargo.toml files only. Preserve package
+metadata, workspace membership, features, profiles, lints, source selectors, and unrelated
+dependencies. Coordinate normal, development, build, workspace, target-specific, and patch
+version requirements when they block an exact target. For a transitive target, update an
+existing direct parent constraint rather than adding the target as a new direct dependency.
+Never edit Cargo.lock directly; Cargo owns it. Resolve every registry target to its exact
+requested SemVer as one coherent update. Git and path package updates are not supported.
+"""
+resolve_script = '''
+mkdir -p /tmp/cargo-home /tmp/cargo-target
+export CARGO_HOME=/tmp/cargo-home
+export CARGO_TARGET_DIR=/tmp/cargo-target
+export CARGO_NET_GIT_FETCH_WITH_CLI=false
+export CARGO_TERM_COLOR=never
+perl <<'PERL'
+use strict;
+use warnings;
+
+sub parse_updates {
+    my ($json) = @_;
+    $json =~ s/^\s*\[\s*// or die "BUMPIRE_UPDATE_TARGETS_JSON must be an array\n";
+    $json =~ s/\s*\]\s*$// or die "BUMPIRE_UPDATE_TARGETS_JSON must be an array\n";
+    my @updates;
+    while ($json =~ /\S/) {
+        $json =~ s/^\s*\{\s*"package"\s*:\s*"([A-Za-z0-9_-]+)"\s*,\s*"version"\s*:\s*"([0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)"\s*\}\s*//
+            or die "each Cargo update target must contain a safe package and exact SemVer\n";
+        push @updates, [$1, $2];
+        last unless $json =~ /\S/;
+        $json =~ s/^,\s*// or die "invalid BUMPIRE_UPDATE_TARGETS_JSON\n";
+    }
+    die "BUMPIRE_UPDATE_TARGETS_JSON must not be empty\n" unless @updates;
+    return @updates;
+}
+
+sub registry_packages {
+    my ($wanted) = @_;
+    open my $lock, '<', 'Cargo.lock' or die "cannot read Cargo.lock: $!\n";
+    local $/;
+    my $content = <$lock>;
+    close $lock;
+    my @packages;
+    for my $entry (split /^\[\[package\]\]\s*$/m, $content) {
+        my ($name) = $entry =~ /^name\s*=\s*"([A-Za-z0-9_-]+)"\s*$/m;
+        next unless defined $name && $name eq $wanted;
+        my ($version) = $entry =~ /^version\s*=\s*"([^"\r\n]+)"\s*$/m;
+        my ($source) = $entry =~ /^source\s*=\s*"([^"\r\n]+)"\s*$/m;
+        next unless defined $version && defined $source && $source =~ /^registry\+/;
+        die "unsafe version in Cargo.lock\n"
+            unless $version =~ /^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
+        push @packages, [$version, $source];
+    }
+    return @packages;
+}
+
+my @updates = parse_updates($ENV{BUMPIRE_UPDATE_TARGETS_JSON} // '');
+for my $update (@updates) {
+    my ($name, $target) = @$update;
+    my $iterations = 0;
+    while (1) {
+        my @packages = registry_packages($name);
+        die "registry package $name is not present in Cargo.lock\n" unless @packages;
+        my ($current) = grep { $_->[0] ne $target } @packages;
+        last unless defined $current;
+        die "too many locked versions while updating $name\n" if ++$iterations > 64;
+        my ($version, $source) = @$current;
+        my $spec = $source . '#' . $name . '@' . $version;
+        system('cargo', 'update', '--color', 'never', '--package', $spec, '--precise', $target);
+        die "cargo update failed for $name ($version -> $target)\n" unless $? == 0;
+    }
+}
+PERL
+'''
+resolved_graph_script = '''
+perl <<'PERL'
+use strict;
+use warnings;
+
+sub parse_targets {
+    my ($json) = @_;
+    $json =~ s/^\s*\[\s*// or die "BUMPIRE_TARGETS_JSON must be an array\n";
+    $json =~ s/\s*\]\s*$// or die "BUMPIRE_TARGETS_JSON must be an array\n";
+    my @targets;
+    while ($json =~ /\S/) {
+        $json =~ s/^\s*"([A-Za-z0-9_-]+)"\s*//
+            or die "Cargo target names may contain only letters, numbers, hyphens, and underscores\n";
+        push @targets, $1;
+        last unless $json =~ /\S/;
+        $json =~ s/^,\s*// or die "invalid BUMPIRE_TARGETS_JSON\n";
+    }
+    return @targets;
+}
+
+my @targets = parse_targets($ENV{BUMPIRE_TARGETS_JSON} // '');
+my %wanted = map { $_ => 1 } @targets;
+my %versions = map { $_ => {} } @targets;
+
+open my $lock, '<', 'Cargo.lock' or die "cannot read Cargo.lock: $!\n";
+local $/;
+my $content = <$lock>;
+close $lock;
+for my $entry (split /^\[\[package\]\]\s*$/m, $content) {
+    my ($name) = $entry =~ /^name\s*=\s*"([A-Za-z0-9_-]+)"\s*$/m;
+    next unless defined $name && $wanted{$name};
+    my ($version) = $entry =~ /^version\s*=\s*"([^"\r\n]+)"\s*$/m;
+    my ($source) = $entry =~ /^source\s*=\s*"([^"\r\n]+)"\s*$/m;
+    next unless defined $version && defined $source && $source =~ /^registry\+/;
+    die "unsafe version in Cargo.lock\n"
+        unless $version =~ /^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
+    $versions{$name}{$version} = 1;
+}
+
+my @entries;
+for my $target (@targets) {
+    my @locked = sort keys %{$versions{$target}};
+    push @entries, '"' . $target . '":['
+        . join(',', map { '"' . $_ . '"' } @locked) . ']';
+}
+print '{"schema_version":1,"packages":{' . join(',', @entries) . "}}\n";
+PERL
+'''
+
+[manifest_policy]
+kind = "toml-paths"
+allowed_paths = [
+  "dependencies",
+  "dev-dependencies",
+  "build-dependencies",
+  "workspace.dependencies",
+  "target.*.dependencies",
+  "target.*.dev-dependencies",
+  "target.*.build-dependencies",
+  "patch.*",
+]
+preserved_toml_table_key_paths = [
+  "dependencies",
+  "dev-dependencies",
+  "build-dependencies",
+  "workspace.dependencies",
+  "target.*.dependencies",
+  "target.*.dev-dependencies",
+  "target.*.build-dependencies",
+  "patch.*",
+]
+mutable_toml_table_value_keys = ["version"]
+forbid_new_toml_table_keys = true
+
+[[runtime_version_sources]]
+path = "rust-toolchain.toml"
+pattern = '^\s*channel\s*=\s*"(?P<version>\d+\.\d+(?:\.\d+)?)"\s*$'
+
+[[runtime_version_sources]]
+path = "rust-toolchain"
+pattern = '^\s*(?P<version>\d+\.\d+(?:\.\d+)?)\s*$'
+
+[[rejected_content]]
+path = ".cargo/config.toml"
+pattern = '''(?im)^\s*["']?(?:global-credential-providers|credential-provider)["']?\s*='''
+reason = "repository-controlled Cargo credential providers can execute arbitrary programs"
+
+[[rejected_content]]
+path = ".cargo/config"
+pattern = '''(?im)^\s*["']?(?:global-credential-providers|credential-provider)["']?\s*='''
+reason = "repository-controlled Cargo credential providers can execute arbitrary programs"
