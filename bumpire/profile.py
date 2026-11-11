@@ -41,6 +41,8 @@ class RejectedContent(BaseModel):
 class ManifestPolicy(BaseModel):
     kind: Literal["json-sections", "changed-line-patterns", "toml-paths"]
     allowed_sections: list[str] = Field(default_factory=list)
+    forbid_new_json_section_keys: bool = False
+    protected_json_key_pattern: str | None = None
     allowed_line_patterns: list[str] = Field(default_factory=list)
     allowed_paths: list[str] = Field(default_factory=list)
     protected_paths: list[str] = Field(default_factory=list)
@@ -62,6 +64,8 @@ class ManifestPolicy(BaseModel):
             raise ValueError("toml-paths policy requires allowed_paths")
         for pattern in self.allowed_line_patterns:
             re.compile(pattern)
+        if self.protected_json_key_pattern is not None:
+            re.compile(self.protected_json_key_pattern)
         for path in [
             *self.allowed_paths,
             *self.protected_paths,
@@ -305,6 +309,14 @@ class PackageManagerProfile(BaseModel):
         for section in allowed & set(after):
             if not isinstance(after[section], dict):
                 raise ValueError(f"dependency section must remain an object: {section}")
+            if (
+                self.manifest_policy.forbid_new_json_section_keys
+                and section not in before
+                and after[section]
+            ):
+                raise ValueError(
+                    f"dependencies may not be added to {section}: {sorted(after[section])}"
+                )
         for section in allowed & set(before):
             if not isinstance(before[section], dict):
                 raise ValueError(f"dependency section must be an object: {section}")
@@ -313,6 +325,28 @@ class PackageManagerProfile(BaseModel):
             removed = sorted(set(before[section]) - set(after[section]))
             if removed:
                 raise ValueError(f"dependencies may not be removed from {section}: {removed}")
+            added = sorted(set(after[section]) - set(before[section]))
+            if self.manifest_policy.forbid_new_json_section_keys and added:
+                raise ValueError(f"dependencies may not be added to {section}: {added}")
+            protected_pattern = self.manifest_policy.protected_json_key_pattern
+            if protected_pattern is not None:
+                protected = {
+                    key
+                    for key in set(before[section]) | set(after[section])
+                    if re.search(protected_pattern, key)
+                }
+                changed_protected = sorted(
+                    key
+                    for key in protected
+                    if key not in before[section]
+                    or key not in after[section]
+                    or before[section][key] != after[section][key]
+                )
+                if changed_protected:
+                    raise ValueError(
+                        "manifest replacement changes protected JSON dependencies in "
+                        f"{section}: {changed_protected}"
+                    )
 
     def _validate_toml_paths(self, original: str, replacement: str) -> None:
         try:

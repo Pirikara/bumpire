@@ -18,6 +18,7 @@ def test_builtin_profiles_are_declarative_and_complete() -> None:
         "bun",
         "bundler",
         "cargo",
+        "composer",
         "npm",
         "pdm",
         "pip-tools",
@@ -32,6 +33,7 @@ def test_builtin_profiles_are_declarative_and_complete() -> None:
     assert "bun install --lockfile-only" in profiles["bun"].resolve_script
     assert "bundle lock" in profiles["bundler"].resolve_script
     assert "cargo', 'update'" in profiles["cargo"].resolve_script
+    assert "'/tmp/composer.phar'" in profiles["composer"].resolve_script
     assert '"update"' in profiles["poetry"].resolve_script
     assert '"uv", "lock"' in profiles["uv"].resolve_script
     assert "JSON.stringify" in profiles["npm"].resolved_graph_script
@@ -186,6 +188,43 @@ def test_cargo_driver_rejects_repository_credential_providers(
 
     with pytest.raises(ValueError, match="credential providers"):
         profile.validate_workspace(tmp_path)
+
+
+def test_composer_profile_extracts_php_version_and_uses_pinned_composer(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "composer.json").write_text(
+        '{"name":"example/project","require":{"php":"^8.3"}}\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "composer.lock").write_text(
+        '{"packages":[],"packages-dev":[]}\n',
+        encoding="utf-8",
+    )
+    (tmp_path / ".php-version").write_text("8.3.12\n", encoding="utf-8")
+
+    profile = detect_profile(tmp_path, ".")
+
+    assert profile.name == "composer"
+    assert profile.runtime_version(tmp_path) == "8.3"
+    assert profile.manager_version(tmp_path) == "2.11.1"
+    assert profile.image(tmp_path) == "php:8.3-cli-alpine"
+
+
+def test_composer_profile_uses_configured_platform_php(tmp_path: Path) -> None:
+    (tmp_path / "composer.json").write_text(
+        '{"name":"example/project","config":{"platform":{"php":"8.2.17"}}}\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "composer.lock").write_text(
+        '{"packages":[],"packages-dev":[]}\n',
+        encoding="utf-8",
+    )
+
+    profile = detect_profile(tmp_path, ".")
+
+    assert profile.runtime_version(tmp_path) == "8.2"
+    assert profile.image(tmp_path) == "php:8.2-cli-alpine"
 
 
 def test_uv_profile_extracts_versions_and_discovers_workspace_manifests(
@@ -451,6 +490,61 @@ itoa = { version = "1.0.14" }
             original,
             dependency_update.replace(existing, changed),
         )
+
+
+def test_composer_manifest_policy_allows_only_existing_package_constraints() -> None:
+    profile = _profiles_by_name()["composer"]
+    original = json.dumps(
+        {
+            "name": "example/project",
+            "require": {
+                "php": "^8.2",
+                "ext-json": "*",
+                "monolog/monolog": "^3.8",
+            },
+            "require-dev": {"phpunit/phpunit": "^11.0"},
+            "scripts": {"test": "phpunit"},
+            "repositories": [{"type": "composer", "url": "https://repo.packagist.org"}],
+        }
+    )
+    dependency_update = json.dumps(
+        {
+            "name": "example/project",
+            "require": {
+                "php": "^8.2",
+                "ext-json": "*",
+                "monolog/monolog": "^3.9",
+            },
+            "require-dev": {"phpunit/phpunit": "^11.5"},
+            "scripts": {"test": "phpunit"},
+            "repositories": [{"type": "composer", "url": "https://repo.packagist.org"}],
+        }
+    )
+
+    profile.validate_manifest_replacement(original, dependency_update)
+
+    with pytest.raises(ValueError, match="protected JSON fields"):
+        profile.validate_manifest_replacement(
+            original,
+            dependency_update.replace("phpunit", "curl example.invalid"),
+        )
+    with pytest.raises(ValueError, match="dependencies may not be added"):
+        added = json.loads(dependency_update)
+        added["require"]["psr/log"] = "^3.0"
+        profile.validate_manifest_replacement(original, json.dumps(added))
+    with pytest.raises(ValueError, match="dependencies may not be added"):
+        without_dev = json.loads(original)
+        without_dev.pop("require-dev")
+        with_new_section = json.loads(dependency_update)
+        profile.validate_manifest_replacement(json.dumps(without_dev), json.dumps(with_new_section))
+    with pytest.raises(ValueError, match="dependencies may not be removed"):
+        removed = json.loads(dependency_update)
+        removed["require"].pop("monolog/monolog")
+        profile.validate_manifest_replacement(original, json.dumps(removed))
+    with pytest.raises(ValueError, match="protected JSON dependencies"):
+        platform_update = json.loads(dependency_update)
+        platform_update["require"]["php"] = "^8.3"
+        profile.validate_manifest_replacement(original, json.dumps(platform_update))
 
 
 def test_uv_manifest_policy_allows_dependencies_but_protects_project_code() -> None:

@@ -175,8 +175,8 @@ uv run bumpire publish \
 
 Use `--workspace path/to/app` for a package nested inside a monorepo. If multiple
 profiles match the same workspace, select one explicitly with `--ecosystem` followed by
-`npm`, `pnpm`, `yarn`, `bun`, `bundler`, `cargo`, `uv`, `poetry`, `pdm`, or
-`pip-tools`.
+`npm`, `pnpm`, `yarn`, `bun`, `bundler`, `cargo`, `composer`, `uv`, `poetry`,
+`pdm`, or `pip-tools`.
 
 ## What gets verified
 
@@ -243,6 +243,7 @@ Python adapters.
 | Bun | `package.json` + `bun.lock` | Dependency-related JSON sections | `bun install --lockfile-only --ignore-scripts` | Bun's native JSONC reader |
 | Bundler | `Gemfile` + `Gemfile.lock` | `gem` declaration lines | `bundle lock` | `Bundler::LockfileParser` |
 | [Cargo](https://doc.rust-lang.org/cargo/) | `Cargo.toml` + `Cargo.lock` | Existing registry dependency versions across workspace and target tables | Per-package `cargo update --precise` using fully qualified package IDs | Networkless registry-package reader for `Cargo.lock` |
+| [Composer](https://getcomposer.org/) | `composer.json` + `composer.lock` | Existing `require` and `require-dev` package constraints | Exact temporary constraints with `composer update --with-all-dependencies --no-install` | Networkless JSON reader for regular and dev packages |
 | uv | `pyproject.toml` + `uv.lock` | PEP 621 dependencies, dependency groups, constraints, and overrides | Exact, batched `uv lock --upgrade-package` | Official `uv workspace metadata` JSON |
 | Poetry | `pyproject.toml` + `poetry.lock` | PEP 621/735 and Poetry dependency tables | Targeted `poetry update --lock` with plugins disabled | Networkless TOML lock reader |
 | [PDM](https://pdm-project.org/) | `pyproject.toml` + `pdm.lock` | PEP 621/735, legacy dev groups, and resolution overrides | Per-target exact constraints with `pdm update --no-sync`, then an unconstrained compatibility re-lock | Networkless TOML lock reader |
@@ -264,7 +265,11 @@ rejects new direct dependency declarations, and requires every occurrence of a t
 pin to reach the requested version. The Cargo driver supports registry packages, keeps
 git/path sources and dependency selectors immutable, and refuses to add a transitive
 crate as a new direct dependency. If multiple locked registry versions share a crate
-name, each occurrence must converge on the requested version or verification fails.
+name, each occurrence must converge on the requested version or verification fails. The
+Composer driver similarly rejects new root requirements, protects PHP and extension
+platform constraints, and resolves normal and development packages together. Composer
+2.11.1 is downloaded by exact version and verified against its published SHA-256 before
+execution.
 
 A driver profile defines:
 
@@ -329,6 +334,7 @@ Bundler then resolves `activestorage` and the other Rails components to `7.2.3.2
 - PDM updates the lockfile with syncing and hooks disabled; it does not install project dependencies.
 - pip-tools compiles lockfiles only; it never runs `pip-sync` or installs project dependencies.
 - Cargo performs lockfile resolution only; it never builds crates or runs build scripts or tests.
+- Composer disables plugins and scripts and uses `--no-install`; package code is not installed or executed.
 - The agent cannot choose the image, shell command, lockfile, or success condition.
 - Staged, unstaged, and untracked files are all checked against an allowlist.
 - The original repository is never modified.
