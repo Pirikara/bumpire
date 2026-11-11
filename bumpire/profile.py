@@ -39,7 +39,12 @@ class RejectedContent(BaseModel):
 
 
 class ManifestPolicy(BaseModel):
-    kind: Literal["json-sections", "changed-line-patterns", "toml-paths"]
+    kind: Literal[
+        "json-sections",
+        "changed-line-patterns",
+        "toml-paths",
+        "yaml-dependency-sections",
+    ]
     allowed_sections: list[str] = Field(default_factory=list)
     forbid_new_json_section_keys: bool = False
     protected_json_key_pattern: str | None = None
@@ -56,8 +61,8 @@ class ManifestPolicy(BaseModel):
 
     @model_validator(mode="after")
     def required_rules(self) -> ManifestPolicy:
-        if self.kind == "json-sections" and not self.allowed_sections:
-            raise ValueError("json-sections policy requires allowed_sections")
+        if self.kind in {"json-sections", "yaml-dependency-sections"} and not self.allowed_sections:
+            raise ValueError(f"{self.kind} policy requires allowed_sections")
         if self.kind == "changed-line-patterns" and not self.allowed_line_patterns:
             raise ValueError("changed-line-patterns policy requires allowed_line_patterns")
         if self.kind == "toml-paths" and not self.allowed_paths:
@@ -257,6 +262,9 @@ class PackageManagerProfile(BaseModel):
         if self.manifest_policy.kind == "toml-paths":
             self._validate_toml_paths(original, replacement)
             return
+        if self.manifest_policy.kind == "yaml-dependency-sections":
+            self._validate_yaml_dependency_sections(original, replacement)
+            return
         changed_lines = [
             line[2:]
             for line in difflib.ndiff(original.splitlines(), replacement.splitlines())
@@ -347,6 +355,150 @@ class PackageManagerProfile(BaseModel):
                         "manifest replacement changes protected JSON dependencies in "
                         f"{section}: {changed_protected}"
                     )
+
+    def _validate_yaml_dependency_sections(self, original: str, replacement: str) -> None:
+        before_projection, before_sections = self._yaml_dependency_document(original)
+        after_projection, after_sections = self._yaml_dependency_document(replacement)
+        if before_projection != after_projection:
+            raise ValueError("manifest replacement changes protected YAML fields")
+
+        for section in self.manifest_policy.allowed_sections:
+            before = before_sections.get(section)
+            after = after_sections.get(section)
+            if before is None or after is None:
+                if before != after:
+                    raise ValueError(
+                        f"YAML dependency section may not be added or removed: {section}"
+                    )
+                continue
+            self._validate_yaml_dependency_section(section, before, after)
+
+    def _yaml_dependency_document(
+        self,
+        document: str,
+    ) -> tuple[str, dict[str, list[str]]]:
+        lines = document.splitlines(keepends=True)
+        top_level: list[tuple[int, str, str]] = []
+        for index, line in enumerate(lines):
+            match = re.match(r"^([A-Za-z_][A-Za-z0-9_-]*):(.*)$", line)
+            if match is not None:
+                top_level.append((index, match.group(1), match.group(2)))
+
+        allowed = set(self.manifest_policy.allowed_sections)
+        sections: dict[str, list[str]] = {}
+        projection: list[str] = []
+        cursor = 0
+        for position, (start, name, remainder) in enumerate(top_level):
+            end = top_level[position + 1][0] if position + 1 < len(top_level) else len(lines)
+            projection.extend(lines[cursor:start])
+            block = lines[start:end]
+            is_block_section = re.fullmatch(r"[ \t]*(?:#.*)?(?:\r?\n)?", remainder)
+            if name in allowed and is_block_section:
+                if name in sections:
+                    raise ValueError(f"duplicate YAML dependency section: {name}")
+                sections[name] = block
+                projection.append(lines[start])
+                projection.append(f"\0bumpire-yaml-section:{name}\0\n")
+            else:
+                projection.extend(block)
+            cursor = end
+        projection.extend(lines[cursor:])
+        return "".join(projection), sections
+
+    def _validate_yaml_dependency_section(
+        self,
+        section: str,
+        before: list[str],
+        after: list[str],
+    ) -> None:
+        before_prefix, before_order, before_entries = self._yaml_dependency_entries(before)
+        after_prefix, after_order, after_entries = self._yaml_dependency_entries(after)
+        removed = sorted(set(before_entries) - set(after_entries))
+        if removed:
+            raise ValueError(f"dependencies may not be removed from {section}: {removed}")
+        added = sorted(set(after_entries) - set(before_entries))
+        if added:
+            raise ValueError(f"dependencies may not be added to {section}: {added}")
+        if before_prefix != after_prefix or before_order != after_order:
+            raise ValueError(f"dependency declaration layout may not change in {section}")
+
+        for dependency in before_order:
+            previous = before_entries[dependency]
+            proposed = after_entries[dependency]
+            if previous == proposed:
+                continue
+            before_scalar = self._yaml_version_declaration(previous)
+            after_scalar = self._yaml_version_declaration(proposed)
+            if before_scalar is None or after_scalar is None:
+                raise ValueError(
+                    "dependency source or selector fields may not change for "
+                    f"{dependency} in {section}"
+                )
+            before_shape, _ = before_scalar
+            after_shape, _ = after_scalar
+            if before_shape != after_shape or previous[1:] != proposed[1:]:
+                raise ValueError(
+                    "dependency declaration formatting may not change for "
+                    f"{dependency} in {section}"
+                )
+
+    @staticmethod
+    def _yaml_dependency_entries(
+        block: list[str],
+    ) -> tuple[list[str], list[str], dict[str, list[str]]]:
+        body = block[1:]
+        candidates: list[tuple[int, int, str]] = []
+        for index, line in enumerate(body):
+            match = re.match(r"^( +)([a-z][a-z0-9_]*):(.*)$", line)
+            if match is not None:
+                candidates.append((index, len(match.group(1)), match.group(2)))
+        if not candidates:
+            return body, [], {}
+        indentation = min(candidate[1] for candidate in candidates)
+        declarations = [candidate for candidate in candidates if candidate[1] == indentation]
+        prefix = body[: declarations[0][0]]
+        order: list[str] = []
+        entries: dict[str, list[str]] = {}
+        for position, (start, _, name) in enumerate(declarations):
+            if name in entries:
+                raise ValueError(f"duplicate YAML dependency declaration: {name}")
+            end = declarations[position + 1][0] if position + 1 < len(declarations) else len(body)
+            order.append(name)
+            entries[name] = body[start:end]
+        return prefix, order, entries
+
+    @staticmethod
+    def _yaml_version_declaration(
+        block: list[str],
+    ) -> tuple[tuple[str, str, str, str, str], str] | None:
+        if not block or any(
+            re.fullmatch(r"[ \t]*(?:#.*)?(?:\r?\n)?", line) is None
+            for line in block[1:]
+        ):
+            return None
+        match = re.fullmatch(
+            r"(?P<indent> +)(?P<name>[a-z][a-z0-9_]*):"
+            r"(?P<spacing>[ \t]+)(?P<value>[^#\r\n]*?)"
+            r"(?P<comment>[ \t]+#.*)?(?P<newline>\r?\n)?",
+            block[0],
+        )
+        if match is None:
+            return None
+        value = match.group("value").strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+            value = value[1:-1]
+        elif '"' in value or "'" in value:
+            return None
+        if re.fullmatch(r"[0-9A-Za-z.*^<>=+ -]+", value) is None:
+            return None
+        shape = (
+            match.group("indent"),
+            match.group("name"),
+            match.group("spacing"),
+            match.group("comment") or "",
+            match.group("newline") or "",
+        )
+        return shape, value
 
     def _validate_toml_paths(self, original: str, replacement: str) -> None:
         try:

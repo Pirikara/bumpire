@@ -1,0 +1,204 @@
+name = "dart-pub"
+ecosystem = "dart-pub"
+detect_all = ["pubspec.yaml", "pubspec.lock"]
+manifest_globs = ["pubspec.yaml"]
+lockfiles = ["pubspec.lock"]
+image_template = "dart:{runtime_version}"
+default_runtime_version = "3.13.7"
+default_manager_version = "3.13.7"
+instructions = """
+Edit existing hosted package constraints in pubspec.yaml dependencies and
+dev_dependencies only. Preserve the Dart SDK constraint, package metadata, Flutter and
+other SDK dependencies, dependency overrides, git/path/hosted source selectors, and
+unrelated dependencies. Coordinate existing direct parent constraints when they block an
+exact transitive target; never add a transitive package as a new direct dependency or
+override. Never edit pubspec.lock directly; Pub owns it. Resolve every hosted target to
+its exact requested version as one coherent update.
+"""
+resolve_script = '''
+mkdir -p /tmp/pub-cache /tmp/bumpire-home
+export PUB_CACHE=/tmp/pub-cache
+export HOME=/tmp/bumpire-home
+export DART_SUPPRESS_ANALYTICS=true
+cat > /tmp/bumpire_resolve.dart <<'DART'
+import 'dart:convert';
+import 'dart:io';
+
+Future<int> run(List<String> arguments) async {
+  final process = await Process.start(
+    'dart',
+    arguments,
+    mode: ProcessStartMode.inheritStdio,
+  );
+  return process.exitCode;
+}
+
+Future<void> main() async {
+  final generated = Directory('.dart_tool');
+  if (generated.existsSync()) {
+    stderr.writeln('dart-pub driver requires .dart_tool to be absent from the repository');
+    exitCode = 1;
+    return;
+  }
+  final decoded = jsonDecode(
+    Platform.environment['BUMPIRE_UPDATE_TARGETS_JSON'] ?? '[]',
+  );
+  if (decoded is! List || decoded.isEmpty) {
+    stderr.writeln('BUMPIRE_UPDATE_TARGETS_JSON must be a non-empty array');
+    exitCode = 1;
+    return;
+  }
+  final packagePattern = RegExp(r'^[a-z][a-z0-9_]*$');
+  final versionPattern = RegExp(
+    r'^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$',
+  );
+  final descriptors = <String>[];
+  for (final target in decoded) {
+    if (target is! Map) {
+      stderr.writeln('each Dart Pub target must contain package and version strings');
+      exitCode = 1;
+      return;
+    }
+    final package = target['package'];
+    final version = target['version'];
+    if (
+      package is! String
+      || !packagePattern.hasMatch(package)
+      || version is! String
+      || !versionPattern.hasMatch(version)
+    ) {
+      stderr.writeln('each Dart Pub target must contain a safe package and exact SemVer');
+      exitCode = 1;
+      return;
+    }
+    descriptors.add('override:$package@$version');
+  }
+
+  final manifest = File('pubspec.yaml');
+  final original = manifest.readAsStringSync();
+  var result = 1;
+  try {
+    result = await run([
+      'pub',
+      'add',
+      ...descriptors,
+      '--no-precompile',
+      '--no-example',
+    ]);
+    manifest.writeAsStringSync(original);
+    if (result == 0) {
+      result = await run([
+        'pub',
+        'get',
+        '--no-precompile',
+        '--no-example',
+      ]);
+    }
+  } finally {
+    manifest.writeAsStringSync(original);
+    if (generated.existsSync()) {
+      generated.deleteSync(recursive: true);
+    }
+  }
+  exitCode = result;
+}
+DART
+dart /tmp/bumpire_resolve.dart
+'''
+resolved_graph_script = '''
+cat > /tmp/bumpire_graph.dart <<'DART'
+import 'dart:convert';
+import 'dart:io';
+
+void main() {
+  final decoded = jsonDecode(
+    Platform.environment['BUMPIRE_TARGETS_JSON'] ?? '[]',
+  );
+  if (decoded is! List || decoded.any((target) => target is! String)) {
+    stderr.writeln('BUMPIRE_TARGETS_JSON must be an array of package names');
+    exitCode = 1;
+    return;
+  }
+  final packagePattern = RegExp(r'^[a-z][a-z0-9_]*$');
+  final targets = decoded.cast<String>();
+  if (targets.any((target) => !packagePattern.hasMatch(target))) {
+    stderr.writeln('invalid Dart Pub package name');
+    exitCode = 1;
+    return;
+  }
+  final versions = <String, Set<String>>{
+    for (final target in targets) target: <String>{},
+  };
+  final packageLine = RegExp(r'^  ([a-z][a-z0-9_]*):\s*$');
+  final topLevelLine = RegExp(r'^[A-Za-z_][A-Za-z0-9_-]*:');
+  var inPackages = false;
+  String? currentName;
+  String? currentSource;
+  String? currentVersion;
+
+  void record() {
+    if (
+      currentName != null
+      && currentSource == 'hosted'
+      && currentVersion != null
+      && versions.containsKey(currentName)
+    ) {
+      versions[currentName]!.add(currentVersion!);
+    }
+  }
+
+  for (final line in File('pubspec.lock').readAsLinesSync()) {
+    if (!inPackages) {
+      if (line == 'packages:') inPackages = true;
+      continue;
+    }
+    final package = packageLine.firstMatch(line);
+    if (package != null) {
+      record();
+      currentName = package.group(1);
+      currentSource = null;
+      currentVersion = null;
+      continue;
+    }
+    if (topLevelLine.hasMatch(line)) {
+      break;
+    }
+    if (line.startsWith('    source:')) {
+      currentSource = line.substring('    source:'.length).trim();
+    } else if (line.startsWith('    version:')) {
+      var value = line.substring('    version:'.length).trim();
+      final comment = value.indexOf(' #');
+      if (comment >= 0) value = value.substring(0, comment).trim();
+      if (
+        value.length >= 2
+        && ((value.startsWith('"') && value.endsWith('"'))
+          || (value.startsWith("'") && value.endsWith("'")))
+      ) {
+        value = value.substring(1, value.length - 1);
+      }
+      currentVersion = value;
+    }
+  }
+  record();
+  final packages = <String, List<String>>{
+    for (final target in targets)
+      target: (versions[target]!.toList()..sort()),
+  };
+  stdout.writeln(jsonEncode({'schema_version': 1, 'packages': packages}));
+}
+DART
+dart /tmp/bumpire_graph.dart
+'''
+
+[manifest_policy]
+kind = "yaml-dependency-sections"
+allowed_sections = ["dependencies", "dev_dependencies"]
+
+[[runtime_version_sources]]
+path = ".dart-version"
+pattern = '^\s*(?P<version>\d+\.\d+\.\d+)\s*$'
+
+[[rejected_content]]
+path = "pubspec.yaml"
+pattern = '(?m)^\s+sdk:\s*flutter\s*(?:#.*)?$'
+reason = "the Dart Pub driver does not include the Flutter SDK"
