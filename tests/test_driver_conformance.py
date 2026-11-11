@@ -84,6 +84,32 @@ BUNDLED WITH
         expected_after={"serde_json": ["1.0.140"], "itoa": ["1.0.15"]},
     ),
     DriverCase(
+        id="composer-lock",
+        profile="composer",
+        files={
+            filename: (Path(__file__).parent / "fixtures" / "composer" / filename).read_text(
+                encoding="utf-8"
+            )
+            for filename in (".php-version", "composer.json", "composer.lock")
+        },
+        targets=["monolog/monolog", "psr/log", "psr/container"],
+        expected={
+            "monolog/monolog": ["3.8.1"],
+            "psr/log": ["3.0.0"],
+            "psr/container": ["2.0.1"],
+        },
+        updates=[
+            {"package": "monolog/monolog", "version": "3.9.0"},
+            {"package": "psr/log", "version": "3.0.2"},
+            {"package": "psr/container", "version": "2.0.2"},
+        ],
+        expected_after={
+            "monolog/monolog": ["3.9.0"],
+            "psr/log": ["3.0.2"],
+            "psr/container": ["2.0.2"],
+        },
+    ),
+    DriverCase(
         id="pnpm-v9",
         profile="pnpm",
         files={
@@ -262,6 +288,7 @@ _RESOLVER_CASES = [
     if case.profile in {
         "bun",
         "cargo",
+        "composer",
         "pdm",
         "pip-tools",
         "pnpm",
@@ -498,6 +525,42 @@ def test_cargo_resolver_rejects_incompatible_exact_upgrade(tmp_path: Path) -> No
                 "BUMPIRE_MANAGER_VERSION": profile.manager_version(tmp_path),
                 "BUMPIRE_UPDATE_TARGETS_JSON": json.dumps(
                     [{"package": "itoa", "version": "0.4.8"}]
+                ),
+            },
+        ),
+        clone_root=tmp_path,
+        workspace=PurePosixPath("."),
+        timeout=600,
+    )
+
+    assert not result.ok
+
+
+@pytest.mark.driver
+@pytest.mark.skipif(
+    os.environ.get("BUMPIRE_DRIVER_CONFORMANCE") != "1",
+    reason="set BUMPIRE_DRIVER_CONFORMANCE=1 to run Docker driver contracts",
+)
+def test_composer_resolver_rejects_incompatible_exact_upgrade(tmp_path: Path) -> None:
+    profile = {profile.name: profile for profile in load_builtin_profiles()}["composer"]
+    fixture = Path(__file__).parent / "fixtures" / "composer"
+    filenames = (".php-version", "composer.json", "composer.lock")
+    _write_fixture(
+        tmp_path,
+        {
+            filename: (fixture / filename).read_text(encoding="utf-8")
+            for filename in filenames
+        },
+    )
+
+    result = DockerRuntime(EventLogger(stream=StringIO())).run(
+        ContainerCommand(
+            image=profile.image(tmp_path),
+            args=("sh", "-ceu", profile.resolve_script, "bumpire-driver"),
+            environment={
+                "BUMPIRE_MANAGER_VERSION": profile.manager_version(tmp_path),
+                "BUMPIRE_UPDATE_TARGETS_JSON": json.dumps(
+                    [{"package": "psr/log", "version": "1.1.4"}]
                 ),
             },
         ),

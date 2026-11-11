@@ -1,0 +1,139 @@
+name = "composer"
+ecosystem = "composer"
+detect_all = ["composer.json", "composer.lock"]
+manifest_globs = ["composer.json"]
+lockfiles = ["composer.lock"]
+image_template = "php:{runtime_version}-cli-alpine"
+default_runtime_version = "8.5"
+default_manager_version = "2.11.1"
+instructions = """
+Edit existing package constraints in composer.json require and require-dev only. Preserve
+PHP, extension, library, and Composer API platform constraints as well as repositories,
+scripts, plugins, autoloading, stability settings, package metadata, and unrelated
+dependencies. Coordinate existing root package requirements when they block an exact
+transitive target; never add a transitive package as a new root requirement. Never edit
+composer.lock directly; Composer owns it. Resolve every target to its exact requested
+version as one coherent update.
+"""
+resolve_script = '''
+mkdir -p /tmp/composer-home /tmp/composer-cache
+export COMPOSER_HOME=/tmp/composer-home
+export COMPOSER_CACHE_DIR=/tmp/composer-cache
+export COMPOSER_ALLOW_SUPERUSER=1
+export COMPOSER_NO_INTERACTION=1
+php <<'PHP'
+<?php
+$composerVersion = getenv('BUMPIRE_MANAGER_VERSION') ?: '';
+if ($composerVersion !== '2.11.1') {
+    fwrite(STDERR, "unsupported Composer version\n");
+    exit(1);
+}
+$url = "https://getcomposer.org/download/{$composerVersion}/composer.phar";
+$phar = @file_get_contents($url);
+$expected = '6f1b891e1d4927d62740276c540fb490e47689e19e102c49e8da849794882f8c';
+if ($phar === false || !hash_equals($expected, hash('sha256', $phar))) {
+    fwrite(STDERR, "failed to download the pinned Composer executable\n");
+    exit(1);
+}
+file_put_contents('/tmp/composer.phar', $phar);
+
+$targets = json_decode(getenv('BUMPIRE_UPDATE_TARGETS_JSON') ?: '[]', true);
+if (!is_array($targets) || !array_is_list($targets) || $targets === []) {
+    fwrite(STDERR, "BUMPIRE_UPDATE_TARGETS_JSON must be a non-empty array\n");
+    exit(1);
+}
+
+$command = [
+    'php',
+    '/tmp/composer.phar',
+    'update',
+    '--no-install',
+    '--no-plugins',
+    '--no-scripts',
+    '--no-interaction',
+    '--no-progress',
+    '--no-audit',
+    '--with-all-dependencies',
+];
+foreach ($targets as $target) {
+    $package = is_array($target) ? ($target['package'] ?? null) : null;
+    $version = is_array($target) ? ($target['version'] ?? null) : null;
+    if (
+        !is_string($package)
+        || !preg_match('{^[a-z0-9](?:[_.-]?[a-z0-9]+)*/[a-z0-9](?:[_.-]?[a-z0-9]+)*$}', $package)
+        || !is_string($version)
+        || !preg_match('{^[0-9A-Za-z][0-9A-Za-z._+-]*$}', $version)
+    ) {
+        fwrite(STDERR, "each Composer target must contain a safe package and exact version\n");
+        exit(1);
+    }
+    $command[] = "{$package}:{$version}";
+}
+
+$process = proc_open($command, [STDIN, STDOUT, STDERR], $pipes);
+if (!is_resource($process)) {
+    fwrite(STDERR, "failed to start Composer\n");
+    exit(1);
+}
+exit(proc_close($process));
+PHP
+'''
+resolved_graph_script = '''
+php <<'PHP'
+<?php
+$targets = json_decode(getenv('BUMPIRE_TARGETS_JSON') ?: '[]', true);
+if (!is_array($targets) || !array_is_list($targets)) {
+    fwrite(STDERR, "BUMPIRE_TARGETS_JSON must be an array of package names\n");
+    exit(1);
+}
+$versions = [];
+foreach ($targets as $target) {
+    if (
+        !is_string($target)
+        || !preg_match('{^[a-z0-9](?:[_.-]?[a-z0-9]+)*/[a-z0-9](?:[_.-]?[a-z0-9]+)*$}', $target)
+    ) {
+        fwrite(STDERR, "invalid Composer package name\n");
+        exit(1);
+    }
+    $versions[$target] = [];
+}
+
+$lock = json_decode(file_get_contents('composer.lock'), true);
+if (!is_array($lock)) {
+    fwrite(STDERR, "composer.lock must contain a JSON object\n");
+    exit(1);
+}
+foreach (['packages', 'packages-dev'] as $section) {
+    foreach (($lock[$section] ?? []) as $package) {
+        $name = is_array($package) ? ($package['name'] ?? null) : null;
+        $version = is_array($package) ? ($package['version'] ?? null) : null;
+        if (is_string($name) && isset($versions[$name]) && is_string($version) && $version !== '') {
+            $versions[$name][$version] = true;
+        }
+    }
+}
+foreach ($versions as $name => $locked) {
+    $values = array_keys($locked);
+    sort($values, SORT_STRING);
+    $versions[$name] = $values;
+}
+echo json_encode(
+    ['schema_version' => 1, 'packages' => $versions],
+    JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR
+), "\n";
+PHP
+'''
+
+[manifest_policy]
+kind = "json-sections"
+allowed_sections = ["require", "require-dev"]
+forbid_new_json_section_keys = true
+protected_json_key_pattern = '^(?:php(?:-64bit)?|hhvm|ext-.+|lib-.+|composer-(?:plugin|runtime)-api)$'
+
+[[runtime_version_sources]]
+path = ".php-version"
+pattern = '^\s*(?P<version>\d+\.\d+)(?:\.\d+)?\s*$'
+
+[[runtime_version_sources]]
+path = "composer.json"
+pattern = '(?s)"platform"\s*:\s*\{.*?"php"\s*:\s*"(?P<version>\d+\.\d+)(?:\.\d+)?"'
